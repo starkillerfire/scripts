@@ -1,108 +1,358 @@
+#Requires -RunAsAdministrator
+#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Installs/updates Adobe Acrobat DC **64-bit only** to the latest Continuous-track build.
+    Installs/updates Adobe Acrobat DC 64-bit to the latest Continuous-track build.
+    Primary method: winget. Falls back to direct Adobe download + MSP patch if winget
+    is unavailable or fails.
 
 .NOTES
     • Tested on Windows 10/11 x64 - run from an elevated PowerShell session.
     • Creates C:\Patches\Acrobat for temp work; cleans up when done.
     • Logs to C:\Patches\Logs\Acrobat-YYYY-MM-DD.log
+    • Full transcript saved to C:\Patches\Logs\Acrobat-YYYY-MM-DD-transcript.log
 #>
 
 # ───────────────────────── BEGIN ─────────────────────────
 BEGIN {
-    $Software   = 'Acrobat'
-    $date       = Get-Date -Format 'yyyy-MM-dd'
-    $logPath    = "C:\Patches\Logs\$Software-$date.log"
-    $acroPath   = "${env:ProgramFiles}\Adobe\Acrobat DC\Acrobat\Acrobat.exe"   # x64 location
-    $dirs       = @("C:\Patches\Logs","C:\Patches\$Software")
+    $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatically speeds up downloads
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    $Software        = 'Acrobat'
+    $WingetId        = 'Adobe.Acrobat.Pro'
+    $date            = Get-Date -Format 'yyyy-MM-dd'
+    $logDir          = 'C:\Patches\Logs'
+    $logPath         = Join-Path $logDir "$Software-$date.log"
+    $transcriptPath  = Join-Path $logDir "$Software-$date-transcript.log"
+    $acroPath        = Join-Path $env:ProgramFiles 'Adobe\Acrobat DC\Acrobat\Acrobat.exe'
+    $workDir         = Join-Path 'C:\Patches' $Software
+    $dirs            = @($logDir, $workDir)
+    $needsPatch      = $false   # true only when manual base MSI path is taken
+    $usedWinget      = $false
 
     function TimeStamp ($msg) {
         $ts = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
-        Add-Content -Path $logPath -Value $ts
-        $ts
+        Add-Content -Path $logPath -Value $ts -ErrorAction SilentlyContinue
+        Write-Host $ts
     }
 
-    foreach ($d in $dirs) { if (!(Test-Path $d)) { New-Item $d -ItemType Directory -Force | Out-Null } }
+    function Get-AcrobatVersion {
+        if (Test-Path $acroPath) { (Get-Item $acroPath).VersionInfo.ProductVersion }
+        else { 'Not installed' }
+    }
 
-    TimeStamp "=== $Software 64-bit deployment started ==="
+    # Called before every exit to ensure temp files and transcript are always cleaned up
+    function Invoke-Cleanup {
+        Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        Stop-Transcript -ErrorAction SilentlyContinue
+    }
+
+    function Exit-Script ([int]$Code) {
+        Invoke-Cleanup
+        exit $Code
+    }
+
+    # Resolves winget.exe in both user sessions and SYSTEM context (Intune)
+    function Get-WingetExe {
+        $wg = Get-Command winget -ErrorAction SilentlyContinue
+        if ($wg) { return $wg.Source }
+        # Under SYSTEM, winget lives in WindowsApps but isn't on PATH
+        $candidates = Get-ChildItem 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe' `
+                      -ErrorAction SilentlyContinue |
+                      Sort-Object LastWriteTime -Descending
+        if ($candidates) { return $candidates[0].FullName }
+        return $null
+    }
+
+    # Retries a download up to $MaxAttempts times with back-off
+    function Invoke-Download {
+        param([string]$Uri, [string]$OutFile, [int]$MaxAttempts = 3)
+        for ($i = 1; $i -le $MaxAttempts; $i++) {
+            try {
+                Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
+                return
+            } catch {
+                if ($i -eq $MaxAttempts) { throw }
+                TimeStamp "Download attempt $i of $MaxAttempts failed - retrying in 10s... ($_)"
+                Start-Sleep 10
+            }
+        }
+    }
+
+    # Launches a process with a hard timeout; returns exit code or -1 if killed for timeout
+    function Invoke-Process {
+        param(
+            [string]$FilePath,
+            $ArgumentList,
+            [int]$TimeoutSeconds = 1800
+        )
+        $proc   = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru -ErrorAction Stop
+        $exited = $proc.WaitForExit($TimeoutSeconds * 1000)
+        if (!$exited) {
+            $proc.Kill()
+            TimeStamp "ERROR - '$FilePath' did not complete within ${TimeoutSeconds}s and was terminated."
+            return -1
+        }
+        return $proc.ExitCode
+    }
+
+    function Stop-AcrobatProcesses {
+        $procs = Get-Process -Name 'Acrobat', 'AcroBroker', 'AcroRd32', 'AcroRd32Info' -ErrorAction SilentlyContinue
+        if ($procs) {
+            TimeStamp "Stopping running Acrobat processes to avoid file locks..."
+            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+            # Wait up to 10s for actual termination rather than assuming a fixed sleep is enough
+            $procs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Returns $false and logs a warning if the drive hosting $Path has less than $RequiredMB free
+    function Test-DiskSpace {
+        param([string]$Path, [int]$RequiredMB)
+        $drive  = Split-Path -Qualifier $Path
+        $disk   = Get-PSDrive -Name $drive.TrimEnd(':') -ErrorAction SilentlyContinue
+        if (!$disk) { return $true }   # can't determine; proceed optimistically
+        $freeMB = [math]::Floor($disk.Free / 1MB)
+        if ($freeMB -lt $RequiredMB) {
+            TimeStamp "ERROR - Insufficient disk space: ${freeMB}MB free on $drive, need ${RequiredMB}MB."
+            return $false
+        }
+        TimeStamp "Disk space OK: ${freeMB}MB free on $drive (need ${RequiredMB}MB)."
+        return $true
+    }
+
+    foreach ($d in $dirs) {
+        if (!(Test-Path $d)) { New-Item $d -ItemType Directory -Force | Out-Null }
+    }
+
+    Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContinue
+
+    # Last-resort handler: logs the error location and exits cleanly so Intune sees a failure code
+    trap {
+        TimeStamp "FATAL - Unhandled error: $_"
+        TimeStamp "  At: $($_.InvocationInfo.PositionMessage)"
+        Exit-Script 1
+    }
+
+    # Rotate logs older than 30 days to keep C:\Patches\Logs tidy
+    Get-ChildItem $logDir -Filter "$Software-*.log" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
+    $isSystem   = [Security.Principal.WindowsIdentity]::GetCurrent().Name -eq 'NT AUTHORITY\SYSTEM'
+    $runContext = if ($isSystem) { 'SYSTEM' } else { $env:USERNAME }
+    TimeStamp "=== $Software 64-bit deployment started on $env:COMPUTERNAME (context: $runContext) ==="
+    TimeStamp "Version before: $(Get-AcrobatVersion)"
 }
 
 # ──────────────────────── PROCESS ────────────────────────
 PROCESS {
 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # =========================================================
+    # PRIMARY: winget
+    # =========================================================
+    $wingetExe = Get-WingetExe
+    if ($wingetExe) {
+        TimeStamp "winget found at: $wingetExe"
 
-    # ----------- prerequisite: VC++ 2013 x64 -----------
-    TimeStamp "Checking for Microsoft Visual C++ 2013 Redistributable (x64)…"
-    $vc2013 = Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*, HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* `
-             | Where-Object { $_.DisplayName -like '*Visual C++*2013*' -and $_.DisplayName -like '*x64*' }
-
-    if (!$vc2013) {
-        $vcUrl  = 'https://download.microsoft.com/download/2/E/6/2E61CFA4-993B-4DD4-91DA-3737CD5CD6E3/vcredist_x64.exe'
-        $vcFile = "C:\Patches\$Software\vcredist_x64_2013.exe"
-        TimeStamp "Downloading VC++ 2013 x64…"
-        Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing
-        TimeStamp "Installing VC++ 2013 x64…"
-        Start-Process $vcFile -ArgumentList '/install /quiet /norestart' -Wait
-    } else {
-        TimeStamp "VC++ 2013 x64 already present (v$($vc2013.DisplayVersion))."
-    }
-
-    # ----------- install base Acrobat if absent -----------
-    $acroExists = Test-Path $acroPath
-    if ($acroExists) {
-        TimeStamp "Found Acrobat at $acroPath - will patch to latest."
-    } else {
-        # Remove any lingering 32-bit install first
-        $legacy = Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -match 'Adobe Acrobat' -and $_.Version -lt  '20' }
-        if ($legacy) {
-            TimeStamp "Uninstalling legacy 32-bit Acrobat before 64-bit deployment…"
-            foreach ($app in $legacy) { $app.Uninstall() | Out-Null }
+        # Refresh sources so stale package lists don't cause "not found" on long-idle machines
+        TimeStamp "Refreshing winget sources..."
+        $srcExit = Invoke-Process -FilePath $wingetExe `
+                   -ArgumentList @('source', 'update', '--disable-interactivity') `
+                   -TimeoutSeconds 120
+        if ($srcExit -ne 0) {
+            TimeStamp "WARNING - winget source update returned exit code $srcExit - continuing anyway."
         }
 
-        $zipUrl  = 'https://ardownload3.adobe.com/pub/adobe/acrobat/win/AcrobatDC/Acrobat_Pro_x64_Web_WWMUI.zip'  # 64-bit unified installer
-        $zipFile = "C:\Patches\$Software\Acrobat_Pro_x64_Web_WWMUI.zip"
-        TimeStamp "Downloading Acrobat 64-bit base media…"
-        Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing
-        TimeStamp "Extracting base media…"
-        Expand-Archive -LiteralPath $zipFile -DestinationPath "C:\Patches\$Software" -Force
+        $wingetLog  = Join-Path $workDir 'winget.log'
+        $commonArgs = @(
+            '--id',    $WingetId
+            '--silent'
+            '--accept-package-agreements'
+            '--accept-source-agreements'
+            '--scope', 'machine'
+            '--architecture', 'x64'
+            '--source', 'winget'
+            '--disable-interactivity'
+            '--log',   $wingetLog
+        )
 
-        $msi = Get-ChildItem "C:\Patches\$Software" -Recurse -Filter 'AcroPro.msi' | Select-Object -First 1
-        if (!$msi) { TimeStamp "ERROR - AcroPro.msi not found after extraction."; exit 1 }
+        $acroInstalled = Test-Path $acroPath
 
-        TimeStamp "Installing Acrobat 64-bit base (silent)…"
-        Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn" -Wait
+        if ($acroInstalled) {
+            # Upgrade path: exit 0 = upgraded; -1978335189 = already at latest version
+            TimeStamp "Existing install detected - attempting winget upgrade..."
+            $wgExit = Invoke-Process -FilePath $wingetExe `
+                      -ArgumentList (@('upgrade') + $commonArgs) `
+                      -TimeoutSeconds 1800
+            TimeStamp "winget upgrade exit code: $wgExit"
+            if ($wgExit -in @(0, -1978335189)) {
+                TimeStamp "winget upgrade succeeded."
+                $usedWinget = $true
+            } else {
+                TimeStamp "winget upgrade failed (exit $wgExit) - will fall back to manual MSP patch."
+                $needsPatch = $true
+            }
+        } else {
+            # Fresh install path
+            TimeStamp "No existing install - attempting winget install..."
+            $wgExit = Invoke-Process -FilePath $wingetExe `
+                      -ArgumentList (@('install') + $commonArgs) `
+                      -TimeoutSeconds 1800
+            TimeStamp "winget install exit code: $wgExit"
+            if ($wgExit -eq 0 -and (Test-Path $acroPath)) {
+                TimeStamp "winget install succeeded."
+                $usedWinget = $true
+            } else {
+                TimeStamp "winget install failed (exit $wgExit) - falling back to manual install."
+            }
+        }
+    } else {
+        TimeStamp "winget not available - proceeding with manual install."
+    }
+
+    # =========================================================
+    # FALLBACK: manual download + MSI base install
+    # =========================================================
+    if (!$usedWinget -and !$needsPatch) {
+
+        # ----------- prerequisite: VC++ 2013 x64 -----------
+        TimeStamp "Checking for Microsoft Visual C++ 2013 Redistributable (x64)..."
+        $vc2013 = @(
+            Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                             'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+                -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like '*Visual C++*2013*' -and $_.DisplayName -like '*x64*' }
+        )
+
+        if (!$vc2013) {
+            $vcUrl  = 'https://download.microsoft.com/download/2/E/6/2E61CFA4-993B-4DD4-91DA-3737CD5CD6E3/vcredist_x64.exe'
+            $vcFile = Join-Path $workDir 'vcredist_x64_2013.exe'
+            TimeStamp "Downloading VC++ 2013 x64..."
+            try { Invoke-Download -Uri $vcUrl -OutFile $vcFile }
+            catch { TimeStamp "ERROR downloading VC++ 2013: $_"; Exit-Script 1 }
+            TimeStamp "Installing VC++ 2013 x64..."
+            $vcExit = Invoke-Process -FilePath $vcFile -ArgumentList '/install /quiet /norestart' -TimeoutSeconds 300
+            if ($vcExit -notin @(0, 3010)) {
+                TimeStamp "WARNING - VC++ 2013 install returned exit code $vcExit."
+            }
+        } else {
+            TimeStamp "VC++ 2013 x64 already present (v$($vc2013[0].DisplayVersion))."
+        }
+
+        # ----------- install base Acrobat if absent -----------
+        if (Test-Path $acroPath) {
+            TimeStamp "Found existing Acrobat - will apply MSP patch."
+            $needsPatch = $true
+        } else {
+            # Query registry directly - avoids Win32_Product which triggers MSI repair on every installed app
+            $legacy = @(
+                Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                                 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+                    -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.DisplayName -match 'Adobe Acrobat' -and
+                    $_.DisplayVersion -and [Version]$_.DisplayVersion -lt [Version]'20.0'
+                }
+            )
+
+            if ($legacy) {
+                TimeStamp "Uninstalling legacy 32-bit Acrobat before 64-bit deployment..."
+                foreach ($app in $legacy) {
+                    $guid = [regex]::Match($app.UninstallString, '\{[0-9A-F\-]+\}').Value
+                    if ($guid) {
+                        $unExit = Invoke-Process -FilePath 'msiexec.exe' `
+                                  -ArgumentList "/x $guid /qn /norestart" `
+                                  -TimeoutSeconds 600
+                        # 1605 = product not registered (already removed); treat as success
+                        if ($unExit -notin @(0, 3010, 1605)) {
+                            TimeStamp "WARNING - Legacy uninstall of $guid returned exit code $unExit."
+                        }
+                    }
+                }
+            }
+
+            # Base zip is ~700 MB extracted to ~1.4 GB; require 1500 MB free before proceeding
+            if (!(Test-DiskSpace -Path $workDir -RequiredMB 1500)) { Exit-Script 1 }
+
+            $zipUrl  = 'https://ardownload3.adobe.com/pub/adobe/acrobat/win/AcrobatDC/Acrobat_Pro_x64_Web_WWMUI.zip'
+            $zipFile = Join-Path $workDir 'Acrobat_Pro_x64_Web_WWMUI.zip'
+            TimeStamp "Downloading Acrobat 64-bit base media..."
+            try { Invoke-Download -Uri $zipUrl -OutFile $zipFile }
+            catch { TimeStamp "ERROR downloading Acrobat base media: $_"; Exit-Script 1 }
+
+            TimeStamp "Extracting base media..."
+            try {
+                Expand-Archive -LiteralPath $zipFile -DestinationPath $workDir -Force -ErrorAction Stop
+            } catch {
+                TimeStamp "ERROR extracting base media: $_"; Exit-Script 1
+            }
+
+            $msi = Get-ChildItem $workDir -Recurse -Filter 'AcroPro.msi' | Select-Object -First 1
+            if (!$msi) { TimeStamp "ERROR - AcroPro.msi not found after extraction."; Exit-Script 1 }
+
+            Stop-AcrobatProcesses
+            TimeStamp "Installing Acrobat 64-bit base (silent)..."
+            $msiExit = Invoke-Process -FilePath 'msiexec.exe' `
+                       -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /l*v `"$logPath`"" `
+                       -TimeoutSeconds 1800
+            if ($msiExit -notin @(0, 3010, 1641)) {
+                TimeStamp "ERROR - Base install failed with exit code $msiExit."; Exit-Script 1
+            }
+            $needsPatch = $true
+        }
     }
 }
 
 # ───────────────────────── END ──────────────────────────
 END {
 
-    # ----------- locate newest 64-bit patch -----------
-    $relUrl   = 'https://www.adobe.com/devnet-docs/acrobatetk/tools/ReleaseNotesDC/continuous/index.html'
-    TimeStamp "Querying Adobe release notes for latest x64 patch…"
-    $html     = Invoke-WebRequest -Uri $relUrl -UseBasicParsing | Select-Object -ExpandProperty Content
-    $m = [regex]::Matches($html, 'https://ardownload3\.adobe\.com[^"]+AcrobatDCx64Upd(?<ver>\d{10})\.msp')
-    if ($m.Count -eq 0) { TimeStamp "No x64 MSP link found - aborting update."; exit }
-    $latest   = $m | Sort-Object { $_.Groups['ver'].Value } -Descending | Select-Object -First 1
+    if ($needsPatch) {
+        # ----------- locate and apply newest 64-bit MSP patch -----------
+        Stop-AcrobatProcesses
 
-    $mspUrl   = $latest.Value
-    $mspVer   = $latest.Groups['ver'].Value
-    $mspPath  = "C:\Patches\$Software\AcrobatDCx64Upd${mspVer}.msp"
+        $relUrl = 'https://www.adobe.com/devnet-docs/acrobatetk/tools/ReleaseNotesDC/continuous/index.html'
+        TimeStamp "Querying Adobe release notes for latest x64 patch..."
+        try {
+            $html = Invoke-WebRequest -Uri $relUrl -UseBasicParsing -ErrorAction Stop |
+                    Select-Object -ExpandProperty Content
+        } catch {
+            TimeStamp "ERROR querying Adobe release notes: $_"; Exit-Script 1
+        }
 
-    TimeStamp "Latest patch identified: $mspVer - downloading…"
-    Invoke-WebRequest -Uri $mspUrl -OutFile $mspPath -UseBasicParsing
+        $m = [regex]::Matches($html, 'https://ardownload3\.adobe\.com[^"]+AcrobatDCx64Upd(?<ver>\d{10})\.msp')
+        if ($m.Count -eq 0) { TimeStamp "No x64 MSP link found - aborting update."; Exit-Script 1 }
 
-    TimeStamp "Applying patch $mspVer…"
-    $proc = Start-Process msiexec.exe -ArgumentList "/update `"$mspPath`" /qn /norestart /l*v `"$logPath`"" -Wait -PassThru
-    switch ($proc.ExitCode) {
-        0     { TimeStamp "Update succeeded." }
-        3010  { TimeStamp "Update succeeded - reboot required (3010)." }
-        1641  { TimeStamp "Update succeeded - installer initiated reboot (1641)." }
-        default{ TimeStamp "Update failed with exit code $($proc.ExitCode)." }
+        $latest  = $m | Sort-Object { $_.Groups['ver'].Value } -Descending | Select-Object -First 1
+        $mspUrl  = $latest.Value
+        $mspVer  = $latest.Groups['ver'].Value
+        $mspPath = Join-Path $workDir "AcrobatDCx64Upd${mspVer}.msp"
+
+        TimeStamp "Latest patch identified: $mspVer - downloading..."
+        try { Invoke-Download -Uri $mspUrl -OutFile $mspPath }
+        catch { TimeStamp "ERROR downloading patch: $_"; Exit-Script 1 }
+
+        TimeStamp "Applying patch $mspVer..."
+        $patchExit = Invoke-Process -FilePath 'msiexec.exe' `
+                     -ArgumentList "/update `"$mspPath`" /qn /norestart /l*v `"$logPath`"" `
+                     -TimeoutSeconds 1800
+        switch ($patchExit) {
+            0       { TimeStamp "Patch applied successfully." }
+            3010    { TimeStamp "Patch applied - reboot required (3010)." }
+            1641    { TimeStamp "Patch applied - installer initiated reboot (1641)." }
+            default { TimeStamp "ERROR - Patch failed with exit code $patchExit."; Exit-Script 1 }
+        }
     }
 
-    TimeStamp "Cleaning up temp files…"
-    Remove-Item "C:\Patches\$Software" -Recurse -Force -ErrorAction SilentlyContinue
-    TimeStamp "=== Deployment finished ==="
+    # Verify the executable is present before declaring success
+    if (!(Test-Path $acroPath)) {
+        TimeStamp "ERROR - Deployment completed but Acrobat.exe not found. Installation may have failed."
+        Exit-Script 1
+    }
+
+    $method = if ($usedWinget) { 'winget' } else { 'manual' }
+    TimeStamp "Version after:  $(Get-AcrobatVersion)"
+    TimeStamp "Cleaning up temp files..."
+    TimeStamp "=== Deployment finished (via $method) on $env:COMPUTERNAME ==="
+    Exit-Script 0
 }
