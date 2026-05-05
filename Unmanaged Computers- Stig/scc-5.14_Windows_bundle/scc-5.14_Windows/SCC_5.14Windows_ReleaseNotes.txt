@@ -1,0 +1,57 @@
+ Distribution A: Approved for Public Release (16 Feb 2021) NIWCLANT SPR# 2021-52
+
+ SCAP Compliance Checker Release Notes                   Feb 11, 2026   09:25:55
+ Naval Information Warfare Center (NIWC) Atlantic
+ https://www.niwcatlantic.navy.mil/scap/
+
+
+ SCAP Compliance Checker 5.14 Features Added
+ ===============================================================================
+ Type     IssueID  Summary
+ -------------------------------------------------------------------------------
+ Feature  33097    Update UNIX file searches to apply filters at the time of
+                   search instead of gathering all directories/files and then
+                   filtering
+
+ Feature  33080    Update screen log to print duration for each test and
+                   provide a list of slow tests (longer than 5 min) at the end
+                   of the scan
+
+ Feature  33079    Improve filesearch efficiency on unix path pattern matches
+
+ Feature  33057    Add option to put a maximum number of failed item/state
+                   comparions to perform for each test
+
+ Feature  33043    Redesign UNIX shadow test to be more efficient for large
+                   numbers of users
+
+ Feature  33042    Redesign UNIX password test to be more efficient for large
+                   numbers of users
+
+
+
+ SCAP Compliance Checker 5.14 Defects Resolved
+ ===============================================================================
+ Type     IssueID  Summary
+ -------------------------------------------------------------------------------
+ Defect   33090    Improve support for TMSAD XML-exc-C14N for validating
+                   digitally signed content
+
+ Defect   33089    Fix GPG signature verification issues with RHEL7 build
+
+ Defect   33072    Update content update repositories only work on non-standard
+                   ports   
+
+ Defect   33070    cscc --checkForContentUpdates --installUpdates ignores
+                   content settings
+
+ Defect   33064    Incorrect debian_evr_string Version Comparison in SCC 5.12
+
+ Defect   33061    Update error handling of OVAL fileeffectiverights53 tests to
+                   only print a warning if unable to gather permissions
+
+ Defect   33049    Fix permissions on CKLB report on linux
+
+ Defect   33036    Improve UNIX file search efficiency to use new failed item
+                   theshold when tests specify 'none_exist'
+

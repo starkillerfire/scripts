@@ -1,0 +1,150 @@
+<# 
+Bluebeam Revu 21 Log Collector
+- Collects Revu logs
+- Enables CAPI2 logging, prompts you to reproduce, exports CAPI2 events, then disables
+- Captures cert/chain/CRL diagnostics (certutil)
+- Zips everything into one file on your Desktop
+
+References:
+- Bluebeam logs & “Explore Log Folder” / Extended Debugging
+- Microsoft CAPI2 Operational logging
+- certutil -URLcache and -getreg chain
+#>
+
+[CmdletBinding()]
+param(
+  [string]$MinutesToCapture = "20"   # CAPI2 events timeframe
+)
+
+$ErrorActionPreference = "Stop"
+
+function Info($m){ Write-Host "[INFO] $m" }
+function Warn($m){ Write-Host "[WARN] $m" -ForegroundColor Yellow }
+function Ok($m){ Write-Host "[ OK ] $m" -ForegroundColor Green }
+
+# Prep working folder
+$Stamp   = Get-Date -Format "yyyyMMdd_HHmmss"
+$OutRoot = Join-Path $env:USERPROFILE ("Desktop\\Bluebeam_SupportBundle_$Stamp")
+$LogsDir = Join-Path $OutRoot "BluebeamLogs"
+$DiagDir = Join-Path $OutRoot "Diagnostics"
+$EvtDir  = Join-Path $OutRoot "CAPI2"
+New-Item -ItemType Directory -Force -Path $OutRoot,$LogsDir,$DiagDir,$EvtDir | Out-Null
+
+# 1) Bluebeam Revu 21 logs
+$RevuLogs = Join-Path $env:LOCALAPPDATA "Bluebeam\Revu\21\Logs"
+if (Test-Path $RevuLogs) {
+  Copy-Item -Path (Join-Path $RevuLogs "*") -Destination $LogsDir -Recurse -Force -ErrorAction SilentlyContinue
+  Ok "Copied Bluebeam Revu logs from: $RevuLogs"
+} else {
+  Warn "Revu 21 log folder not found at $RevuLogs (open Revu → Preferences → Admin → Explore Log Folder to verify)."
+}
+
+# Add a README with quick context
+$readme = @"
+Bluebeam Revu 21 log bundle
+Generated: $(Get-Date -Format u)
+
+If Support wants more detail:
+- In Revu: Revu → Preferences (Ctrl+K) → Admin → ENABLE 'Extended Debugging', then reproduce the issue and re-run this script. (Revu may need a restart.)
+
+"@
+$readme | Set-Content (Join-Path $OutRoot "README.txt")
+
+# 2) Environment snapshot
+$EnvTxt = Join-Path $DiagDir "env.txt"
+$os = (Get-CimInstance Win32_OperatingSystem) 2>$null
+$bbApps = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
+  ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+  Where-Object { $_.DisplayName -match "Bluebeam Revu" }
+
+@"
+MachineName: $env:COMPUTERNAME
+User:        $env:USERNAME
+OS:          $($os.Caption) ($($os.Version)) Build $([Environment]::OSVersion.Version.Build)
+Installed Bluebeam entries:
+$($bbApps | Sort-Object DisplayName | Format-Table DisplayName, DisplayVersion, Publisher -Auto | Out-String)
+"@ | Set-Content $EnvTxt
+
+# 3) CAPI2 logging (PKI chain & revocation trace)
+$capilog = "Microsoft-Windows-CAPI2/Operational"
+try {
+  wevtutil sl "$capilog" /e:true | Out-Null
+  Ok "Enabled CAPI2 Operational logging."
+} catch { Warn "Could not enable CAPI2 logging (try running PowerShell as Administrator). Continuing." }
+
+Write-Host ""
+Write-Host ">>> Now reproduce the Bluebeam signing failure. When you're done, press ENTER to continue."
+Read-Host | Out-Null
+
+# Export recent CAPI2 events
+try {
+  $Since = (Get-Date).AddMinutes(-[int]$MinutesToCapture).ToString("o")
+  $Query = @"
+<QueryList>
+  <Query Id="0" Path="$capilog">
+    <Select>*[System[TimeCreated[@SystemTime >= '$Since']]]</Select>
+  </Query>
+</QueryList>
+"@
+  $evtx = Join-Path $EvtDir "CAPI2_Recent.evtx"
+  wevtutil epl "$capilog" "$evtx" /q:"$Query" | Out-Null
+  Ok "Exported recent CAPI2 events → $evtx"
+} catch { Warn "CAPI2 export failed (insufficient rights or no events). You can export manually from Event Viewer." }
+
+# Disable CAPI2 again (best practice)
+try { wevtutil sl "$capilog" /e:false | Out-Null } catch {}
+
+# 4) Cert & revocation diagnostics
+function Run-CmdOut($file, $cmd, $args) {
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $p.StartInfo.FileName = $cmd
+  $p.StartInfo.Arguments = $args
+  $p.StartInfo.RedirectStandardOutput = $true
+  $p.StartInfo.RedirectStandardError  = $true
+  $p.StartInfo.UseShellExecute = $false
+  $null = $p.Start()
+  $out = $p.StandardOutput.ReadToEnd()
+  $err = $p.StandardError.ReadToEnd()
+  $p.WaitForExit()
+  $out | Set-Content $file
+  if ($err) { Add-Content $file "`n--- STDERR ---`n$err" }
+}
+
+# a) Current user's personal & intermediate stores
+Run-CmdOut (Join-Path $DiagDir "cert_store_user_my.txt")  "certutil.exe" "-user -store my"
+Run-CmdOut (Join-Path $DiagDir "cert_store_user_ca.txt")  "certutil.exe" "-user -store ca"
+Run-CmdOut (Join-Path $DiagDir "cert_store_user_root.txt") "certutil.exe" "-user -store root"
+
+# b) LocalMachine stores (if admin)
+try {
+  Run-CmdOut (Join-Path $DiagDir "cert_store_lm_my.txt")   "certutil.exe" "-store my"
+  Run-CmdOut (Join-Path $DiagDir "cert_store_lm_ca.txt")   "certutil.exe" "-store ca"
+  Run-CmdOut (Join-Path $DiagDir "cert_store_lm_root.txt") "certutil.exe" "-store root"
+} catch { Warn "Could not read LocalMachine stores (need elevation). Skipping." }
+
+# c) Chain engine config & URL cache
+Run-CmdOut (Join-Path $DiagDir "cert_chain_config.txt") "certutil.exe" "-getreg chain"
+Run-CmdOut (Join-Path $DiagDir "cert_urlcache_list.txt") "certutil.exe" "-URLcache *"
+
+# (Optional) clear user CRL/URL cache AFTER we recorded it; comment out if not desired
+try {
+  Run-CmdOut (Join-Path $DiagDir "cert_urlcache_clear.txt") "certutil.exe" "-URLcache * delete"
+} catch { Warn "Could not clear URL cache (non-fatal)." }
+
+# 5) GPResult (to show no custom PKI policy)
+try {
+  $rsop = Join-Path $DiagDir "gpresult.html"
+  gpresult /h "$rsop" | Out-Null
+  Ok "Captured RSOP → $rsop"
+} catch { Warn "gpresult failed (non-fatal)." }
+
+# 6) Zip it all up
+$ZipPath = Join-Path $env:USERPROFILE ("Desktop\\Bluebeam_SupportBundle_$Stamp.zip")
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory($OutRoot, $ZipPath)
+
+Ok "Bundle created: $ZipPath"
+Write-Host ""
+Write-Host "Attach this ZIP to your Bluebeam Support case."
+Write-Host "If Support wants more detail, enable 'Extended Debugging' in Revu (Preferences → Admin), reproduce, and run again."
