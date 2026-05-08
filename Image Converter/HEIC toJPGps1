@@ -1,0 +1,57 @@
+# Requires "HEIF Image Extensions" from the Microsoft Store
+# https://apps.microsoft.com/detail/9pmmsr1cgpwg
+
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+
+if (-not (Get-AppxPackage -Name Microsoft.HEIFImageExtension -ErrorAction SilentlyContinue)) {
+    Write-Host "HEIF Image Extensions not found. Attempting to install via winget..."
+
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget is not available. Install HEIF Image Extensions manually: https://apps.microsoft.com/detail/9pmmsr1cgpwg"
+    }
+
+    winget install --id 9PMMSR1CGPWG --source msstore --accept-package-agreements --accept-source-agreements --silent
+
+    if (-not (Get-AppxPackage -Name Microsoft.HEIFImageExtension -ErrorAction SilentlyContinue)) {
+        throw "Installation failed. Install HEIF Image Extensions manually: https://apps.microsoft.com/detail/9pmmsr1cgpwg"
+    }
+
+    Write-Host "HEIF Image Extensions installed successfully."
+}
+
+# Set source and output folders
+$SourceFolder = "C:\Path\To\HEIC"
+$OutputFolder = "C:\Path\To\JPEG"
+$Quality      = 95  # 1–100
+
+if (!(Test-Path $OutputFolder)) {
+    New-Item -ItemType Directory -Path $OutputFolder | Out-Null
+}
+
+$files = Get-ChildItem -Path $SourceFolder -Filter *.heic
+
+foreach ($file in $files) {
+    try {
+        $uri     = [System.Uri]::new($file.FullName)
+        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+            $uri,
+            [System.Windows.Media.Imaging.BitmapCreateOptions]::None,
+            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        )
+
+        $encoder               = New-Object System.Windows.Media.Imaging.JpegBitmapEncoder
+        $encoder.QualityLevel  = $Quality
+        $encoder.Frames.Add($decoder.Frames[0])
+
+        $jpgPath = Join-Path $OutputFolder ($file.BaseName + ".jpg")
+        $stream  = [System.IO.File]::Open($jpgPath, [System.IO.FileMode]::Create)
+        $encoder.Save($stream)
+        $stream.Dispose()
+
+        Write-Host "Converted: $($file.Name)"
+    }
+    catch {
+        Write-Warning "Failed to convert $($file.Name): $_"
+    }
+}

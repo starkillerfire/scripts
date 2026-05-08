@@ -160,7 +160,7 @@ function Install-DellCommandUpdate {
     }
     $msi = Get-ChildItem -Path $FolderPath -Filter '*.msi' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($msi) {
-        & msiexec.exe /i $msi /quiet /norestart
+        & msiexec.exe /i "`"$($msi.FullName)`"" /quiet /norestart
         if ($LASTEXITCODE -eq 0) {
             Write-Log -Level 'Information' -Message 'DCU MSI installed successfully.'
             return @{ Status = 'Installed'; Version = 'via-MSI' }

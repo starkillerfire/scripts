@@ -49,21 +49,22 @@ try {
 Set-Content -Path $localScriptPath -Value $remoteScriptContent -Force
 
 # Function to Apply Registry Key and Retrieve Logs
-function Apply-RegistryKey {
+function Invoke-RemoteRegistryKey {
     param ([string]$TargetSystem)
 
     try {
         Write-Output "Processing: ${TargetSystem}"
 
-        # Define Paths
-        $remoteScript = "\\${TargetSystem}\C$\Temp\RemoteRegistryScript.ps1"
-        $remoteLog    = "\\${TargetSystem}\C$\Temp\output.log"
+        # Build UNC equivalent of $remoteFolderPath (e.g. "C:\Temp" -> "\\host\C$\Temp")
+        $remoteUNC    = '\\' + $TargetSystem + '\' + ($remoteFolderPath -replace '^([A-Za-z]):\\', '$1$\')
+        $remoteScript = "$remoteUNC\RemoteRegistryScript.ps1"
+        $remoteLog    = "$remoteUNC\output.log"
         $localLog     = "$localLogFolder\output_${TargetSystem}.log"
 
         # Step 1: Ensure Remote Folder Exists
         Write-Output "Ensuring remote folder exists on ${TargetSystem}..."
         Start-Process -FilePath $psexecPath `
-            -ArgumentList "\\${TargetSystem} -accepteula cmd /c mkdir C:\Temp" `
+            -ArgumentList @("\\$TargetSystem", '-accepteula', 'cmd', '/c', "if not exist $remoteFolderPath mkdir $remoteFolderPath") `
             -NoNewWindow -Wait -ErrorAction Stop
 
         # Step 2: Retry File Copy
@@ -83,9 +84,11 @@ function Apply-RegistryKey {
 
         # Step 3: Execute Script
         Write-Output "Executing script on ${TargetSystem}..."
-        $command = "powershell.exe -ExecutionPolicy Bypass -File C:\Temp\RemoteRegistryScript.ps1 -regPath '$registryPath' -key '$keyName' -value $keyValue -logPath C:\Temp\output.log"
+        $remoteScriptLocal = Join-Path $remoteFolderPath 'RemoteRegistryScript.ps1'
+        $remoteLogLocal    = Join-Path $remoteFolderPath 'output.log'
+        $psArgs = "-ExecutionPolicy Bypass -File `"$remoteScriptLocal`" -regPath `"$registryPath`" -key `"$keyName`" -value $keyValue -logPath `"$remoteLogLocal`""
         Start-Process -FilePath $psexecPath `
-            -ArgumentList "\\${TargetSystem} -accepteula $command" `
+            -ArgumentList @("\\$TargetSystem", '-accepteula', 'powershell.exe', $psArgs) `
             -NoNewWindow -Wait -ErrorAction Stop
 
         # Step 4: Retrieve Logs
@@ -123,7 +126,7 @@ foreach ($system in $systems) {
 
     $TargetSystem = $system.SystemName.Trim()
     if (Test-Connection -ComputerName $TargetSystem -Count 2 -Quiet) {
-        $result = Apply-RegistryKey -TargetSystem $TargetSystem
+        $result = Invoke-RemoteRegistryKey -TargetSystem $TargetSystem
         if ($result.Status -eq "Success") {
             $resultList += $result
         } else {

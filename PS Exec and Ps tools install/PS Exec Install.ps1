@@ -1,4 +1,5 @@
-﻿# Script to Download, Install PsExec to C:\PSTools, and Accept EULA
+﻿#Requires -RunAsAdministrator
+# Script to Download, Install PsExec to C:\PSTools, and Accept EULA
 
 # Define variables
 $DownloadUrl = "https://download.sysinternals.com/files/PSTools.zip"
@@ -31,13 +32,15 @@ catch {
 }
 
 # Step 3: Automatically Accept the EULA for PsExec
+# Set in both HKCU (interactive sessions) and HKLM (SYSTEM / Intune context)
 Write-Host "Accepting PsExec EULA..." -ForegroundColor Cyan
 try {
-    $EulaKeyPath = "HKCU:\Software\Sysinternals\PsExec"
-    if (-Not (Test-Path -Path $EulaKeyPath)) {
-        New-Item -Path $EulaKeyPath -Force | Out-Null
+    foreach ($hive in @("HKCU:\Software\Sysinternals\PsExec", "HKLM:\SOFTWARE\Sysinternals\PsExec")) {
+        if (-Not (Test-Path -Path $hive)) {
+            New-Item -Path $hive -Force | Out-Null
+        }
+        Set-ItemProperty -Path $hive -Name "EulaAccepted" -Value 1
     }
-    Set-ItemProperty -Path $EulaKeyPath -Name "EulaAccepted" -Value 1
     Write-Host "EULA accepted successfully!" -ForegroundColor Green
 }
 catch {
@@ -45,7 +48,10 @@ catch {
     exit
 }
 
-# Step 4: Confirm Installation
+# Step 4: Clean up the downloaded zip
+Remove-Item -Path $OutputPath -Force -ErrorAction SilentlyContinue
+
+# Step 5: Confirm Installation
 if (Test-Path "$InstallPath\PsExec.exe") {
     Write-Host "PsExec is installed successfully!" -ForegroundColor Green
     Write-Host "Path: $InstallPath\PsExec.exe" -ForegroundColor Cyan

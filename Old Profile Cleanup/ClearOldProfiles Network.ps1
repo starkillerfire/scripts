@@ -1,4 +1,4 @@
-﻿# Path to PsExec executable
+# Path to PsExec executable
 $psExecPath = "C:\Sysinternals\PsExec.exe"
 
 # Path to the CSV file with the list of computers
@@ -7,10 +7,10 @@ $csvFilePath = "C:\Users\scarman\Downloads\Laptops.csv"
 # Specify the number of days for the threshold
 $daysThreshold = 30
 
-# Calculate the date threshold
-$dateThreshold = (Get-Date).AddDays(-$daysThreshold).ToFileTime()
+# Embed the cutoff date as a string so the remote side can parse it cleanly.
+# Using a sortable format avoids locale/timezone ambiguity.
+$cutoffDateString = (Get-Date).AddDays(-$daysThreshold).ToString('yyyy-MM-dd HH:mm:ss')
 
-# Import the list of computers from the CSV
 $computers = Import-Csv -Path $csvFilePath
 
 foreach ($computer in $computers) {
@@ -18,15 +18,20 @@ foreach ($computer in $computers) {
     try {
         Write-Output "Processing $computerName..."
 
-        # Define the PowerShell command to run on the remote machine as a single line
-        $remoteCommand = "Get-WmiObject Win32_UserProfile | Where-Object { `$_.LastUseTime -lt $dateThreshold -and -not `$_.Special } | ForEach-Object { Write-Output `"Deleting profile for: `$($_.LocalPath)`"; `$_.Delete() }"
+        # The remote command converts each profile's DMTF LastUseTime to a real DateTime
+        # before comparing it against the cutoff — this avoids the FILETIME/string mismatch.
+        $remoteCommand = @"
+`$cutoff = [datetime]'$cutoffDateString'
+Get-WmiObject Win32_UserProfile |
+    Where-Object { -not `$_.Special -and `$_.LastUseTime } |
+    Where-Object { [Management.ManagementDateTimeConverter]::ToDateTime(`$_.LastUseTime) -lt `$cutoff } |
+    ForEach-Object { Write-Output "Deleting profile: `$(`$_.LocalPath)"; `$_.Delete() }
+"@
 
-        # Run the command on the remote machine using PsExec
-        & "$psExecPath" -accepteula -s \\$computerName powershell -Command $remoteCommand
+        & "$psExecPath" -accepteula -s "\\$computerName" powershell.exe -ExecutionPolicy Bypass -Command $remoteCommand
 
         Write-Output "Profiles older than $daysThreshold days cleared on $computerName."
-    }
-    catch {
+    } catch {
         Write-Output ("Error processing {0}: {1}" -f $computerName, $_)
     }
 }

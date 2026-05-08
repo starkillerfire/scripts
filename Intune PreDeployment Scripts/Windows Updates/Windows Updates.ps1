@@ -12,12 +12,12 @@ param(
     [string]$LogEndpoint='',
     [switch]$WingetCatchUp,
     [switch]$IgnoreBattery,
-    [switch]$Verbose
+    [switch]$EnableVerbose
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-$VerbosePreference=if($Verbose.IsPresent){'Continue'}else{'SilentlyContinue'}
+$VerbosePreference=if($EnableVerbose.IsPresent){'Continue'}else{'SilentlyContinue'}
 $script:HadErrors=$false
 $script:Skipped=$false
 
@@ -76,7 +76,7 @@ $freeGB=[math]::Round((Get-PSDrive C).Free/1GB,1)
 if($freeGB -lt $MinFreeGB){Stop-UpdateScript "Low disk" 2}
 
 if(-not$IgnoreBattery){
-    $bat=Get-WmiObject Win32_Battery -ErrorAction SilentlyContinue
+    $bat=Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
     if($bat -and $bat.BatteryStatus -ne 2){Stop-UpdateScript 'On battery' 2}
 }
 
@@ -99,7 +99,12 @@ function Test-UpdateWindow{
     }
     return $false
 }
-while(-not(Test-UpdateWindow $PatchWindow)){Start-Sleep 900}
+# Wait for the patch window with a 12-hour hard cap to prevent infinite blocking
+$patchWindowDeadline = (Get-Date).AddHours(12)
+while(-not(Test-UpdateWindow $PatchWindow)){
+    if((Get-Date) -gt $patchWindowDeadline){ Stop-UpdateScript 'Patch window wait exceeded 12 hours' 2 }
+    Start-Sleep 900
+}
 
 New-Item $LogDir -ItemType Directory -Force|Out-Null
 Start-Transcript -Path (Join-Path $LogDir "UpdateAll-$env:COMPUTERNAME.log") -Append

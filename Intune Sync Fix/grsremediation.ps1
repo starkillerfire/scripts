@@ -1,7 +1,3 @@
-# Start Logging
-$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-Start-Transcript "C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\App_Failure_Remediation_$timestamp.log"
-
 #### BEGIN FUNCTIONS ####
 
 <#

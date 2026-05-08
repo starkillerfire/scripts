@@ -31,7 +31,9 @@ $logRoot = Join-Path $env:TEMP  ("ScanSnapHome-Install-{0:yyyyMMdd_HHmmss}.log" 
 # --- Self‑elevate ------------------------------------------------------
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process pwsh "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" @PSBoundParameters" -Verb RunAs
+    # Prefer pwsh (PS7) when available, fall back to Windows PowerShell
+    $elevatedExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+    Start-Process $elevatedExe "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     return
 }
 
@@ -65,8 +67,8 @@ try {
             continue
         }
         $silentArgs = @('/s','/SMS',"/f1`"$issPath`"","/f2`"$logRoot`"")
-        Start-Process $pkg.FullName -ArgumentList $silentArgs -WindowStyle Hidden -Wait
-        if ($LASTEXITCODE -ne 0) { throw "$($pkg.Name) exited with $LASTEXITCODE" }
+        $proc = Start-Process $pkg.FullName -ArgumentList $silentArgs -WindowStyle Hidden -Wait -PassThru
+        if ($proc.ExitCode -ne 0) { throw "$($pkg.Name) exited with $($proc.ExitCode)" }
     }
 
     Write-Host "`n✅ ScanSnap Home installed silently (EULA accepted, defaults kept)."

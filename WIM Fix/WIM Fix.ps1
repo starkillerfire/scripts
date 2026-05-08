@@ -52,7 +52,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 
 # Exit on domain controllers
 try {
-    $role = (Get-WmiObject Win32_ComputerSystem).DomainRole
+    $role = (Get-CimInstance Win32_ComputerSystem).DomainRole
     if ($role -in 4, 5) {
         Write-Log "Domain controller detected. Exiting for safety." "WARN"
         Stop-Transcript
@@ -85,10 +85,21 @@ New-Item -Path $backupPath -ItemType Directory -Force | Out-Null
 Copy-Item -Path "$env:WINDIR\System32\wbem\Repository\*" -Destination $backupPath -Recurse -Force
 Write-Log "WMI repository backed up to: $backupPath"
 
-# Reset WMI
+# Attempt to salvage the repository first; only hard-reset if WMI still fails
 cmd /c "winmgmt /salvagerepository" | Out-Null
-cmd /c "winmgmt /resetrepository" | Out-Null
-Write-Log "WMI repository reset complete."
+Write-Log "WMI salvage attempted (exit $LASTEXITCODE)."
+
+Start-Service winmgmt -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
+
+if (-not (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue)) {
+    Write-Log "WMI still unresponsive after salvage — performing hard reset." "WARN"
+    Stop-Service winmgmt -Force -ErrorAction SilentlyContinue
+    cmd /c "winmgmt /resetrepository" | Out-Null
+    Write-Log "WMI hard reset completed (exit $LASTEXITCODE)."
+} else {
+    Write-Log "WMI responsive after salvage — skipping hard reset."
+}
 
 # Register DLLs
 $wmiDlls = @("wbemdisp.dll", "wbemprox.dll", "wbemcomn.dll", "fastprox.dll", "scrcons.exe")
@@ -96,11 +107,12 @@ $system32 = "$env:WINDIR\System32"
 foreach ($dll in $wmiDlls) {
     $dllPath = Join-Path $system32 "wbem\$dll"
     if (Test-Path $dllPath) {
-        try {
-            cmd /c "regsvr32 /s `"$dllPath`"" | Out-Null
+        # cmd /c never throws .NET exceptions — check $LASTEXITCODE instead
+        cmd /c "regsvr32 /s `"$dllPath`"" | Out-Null
+        if ($LASTEXITCODE -eq 0) {
             Write-Log "Registered: $dll"
-        } catch {
-            Write-Log "Failed to register: $dll" "WARN"
+        } else {
+            Write-Log "Failed to register: $dll (regsvr32 exit $LASTEXITCODE)" "WARN"
         }
     }
 }

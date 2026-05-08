@@ -6,18 +6,21 @@
 $Computers = Get-Content D:\Copy1\UpdateChrome.txt #UpdateChrome.txt  #"IBR1ABOURGOIL02"
 
 foreach ($Computer in $Computers) {
-md \\$Computer\c$\TempCH -ErrorAction Ignore
-robocopy "\\ibr1pnrfs001\Everyone\Everyone\Patches\Chrome" "\\$Computer\C$\TempCH" /mir /R:2 /W:2
+    New-Item -Path "\\$Computer\c$\TempCH" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+    robocopy "\\ibr1pnrfs001\Everyone\Everyone\Patches\Chrome" "\\$Computer\C$\TempCH" /mir /R:2 /W:2
+    if ($LASTEXITCODE -ge 8) {
+        Write-Warning "Robocopy failed on $Computer (exit $LASTEXITCODE). Skipping install."
+        continue
+    }
 
-#Start-Sleep -Seconds 60
-./psexec  \\$Computer cmd /c "msiexec.exe /I C:\TempCH\googlechromestandaloneenterprise64.msi /qb"
-./psexec  \\$Computer cmd /c "C:\TempCH\netstop.bat"
-start-sleep -s 5
-./psexec  \\$Computer cmd /c "C:\TempCH\netstart.bat"
+    ./psexec  \\$Computer cmd /c "msiexec.exe /I C:\TempCH\googlechromestandaloneenterprise64.msi /qb"
+    ./psexec  \\$Computer cmd /c "C:\TempCH\netstop.bat"
+    Start-Sleep -Seconds 5
+    ./psexec  \\$Computer cmd /c "C:\TempCH\netstart.bat"
 
-start-sleep -s 10
+    Start-Sleep -Seconds 10
 
-Remove-Item -Path \\$Computer\c$\TempCH -Recurse -Force
+    Remove-Item -Path "\\$Computer\c$\TempCH" -Recurse -Force
 }
 
 

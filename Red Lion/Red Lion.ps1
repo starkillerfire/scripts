@@ -1,39 +1,20 @@
-﻿# Ensure the script runs as Administrator
-$CurrentUser = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-$AdminRole = [Security.Principal.WindowsBuiltInRole]::Administrator
+#Requires -RunAsAdministrator
+# Disable Memory Integrity (HVCI) for Red Lion compatibility.
 
-if (-not $CurrentUser.IsInRole($AdminRole)) {
-    Write-Host "Restarting script as Administrator..."
-    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    exit
-}
-
-# Define the registry path
 $RegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
 
-# Check if the registry key exists
-if (Test-Path $RegistryPath) {
-    Write-Host "Registry key found: $RegistryPath"
+if (-not (Test-Path $RegistryPath)) {
+    Write-Host "Registry key not found: $RegistryPath" -ForegroundColor Yellow
+    Write-Host "Memory Integrity may not be configured on this machine — nothing to disable."
+    exit 0
+}
 
-    # Modify the 'Enabled' value if it exists
-    if (Get-ItemProperty -Path $RegistryPath -Name "Enabled" -ErrorAction SilentlyContinue) {
-        Set-ItemProperty -Path $RegistryPath -Name "Enabled" -Value 0
-        Write-Host "Set 'Enabled' to 0"
-    }
-
-    # Modify the 'WasEnabledBy' value if it exists
-    if (Get-ItemProperty -Path $RegistryPath -Name "WasEnabledBy" -ErrorAction SilentlyContinue) {
-        Set-ItemProperty -Path $RegistryPath -Name "WasEnabledBy" -Value 0
-        Write-Host "Set 'WasEnabledBy' to 0"
-    }
-
-    # Prompt for system restart
-    $Restart = Read-Host "Changes have been made. Do you want to restart now? (Y/N)"
-    if ($Restart -eq "Y" -or $Restart -eq "y") {
-        Restart-Computer -Force
-    } else {
-        Write-Host "Please restart your computer for the changes to take effect."
-    }
-} else {
-    Write-Host "Registry key not found: $RegistryPath. No changes made."
+try {
+    Set-ItemProperty -Path $RegistryPath -Name "Enabled"     -Value 0 -ErrorAction Stop
+    Set-ItemProperty -Path $RegistryPath -Name "WasEnabledBy" -Value 0 -ErrorAction Stop
+    Write-Host "Memory Integrity disabled successfully." -ForegroundColor Green
+    Write-Host "Restart your computer for the changes to take effect." -ForegroundColor Yellow
+} catch {
+    Write-Error "Failed to update registry: $($_.Exception.Message)"
+    exit 1
 }

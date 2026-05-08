@@ -1,13 +1,11 @@
-﻿# Script to delete user profiles not used in the last 60 days on specified computers
+﻿# Script to delete user profiles not used in the last N days on specified computers
 
 # Parameters
 param(
-    [string]$ComputerName = $null,   # Specify a single computer name
-    [string]$CSVFilePath = $null     # Specify a CSV file path containing computer names in a "ComputerName" column
+    [string]$ComputerName  = $null,   # Specify a single computer name
+    [string]$CSVFilePath   = $null,   # Specify a CSV file path containing computer names in a "ComputerName" column
+    [int]   $DaysInactive  = 60       # Profiles unused longer than this will be removed
 )
-
-# Number of days to check for inactivity
-$DaysInactive = 60
 
 # Get today's date
 $CurrentDate = Get-Date
@@ -20,23 +18,28 @@ function Clear-OldProfiles {
 
     Write-Host "Processing computer: $TargetComputer"
 
-    # Get list of local profiles
-    $Profiles = Get-WmiObject Win32_UserProfile -ComputerName $TargetComputer | Where-Object {
-        $_.Special -eq $false -and $_.LocalPath -like "C:\Users\*"
+    if (-not (Test-Connection -ComputerName $TargetComputer -Count 1 -Quiet)) {
+        Write-Host "$TargetComputer is not reachable — skipping." -ForegroundColor Yellow
+        return
     }
 
-    foreach ($Profile in $Profiles) {
-        # Calculate the last logon date
-        $LastUseTime = [Management.ManagementDateTimeConverter]::ToDateTime($Profile.LastUseTime)
+    # Get-WmiObject uses DCOM (RPC) — no WinRM required
+    $UserProfiles = Get-WmiObject Win32_UserProfile -ComputerName $TargetComputer | Where-Object {
+        -not $_.Special -and $_.LocalPath -like "C:\Users\*"
+    }
 
-        # Calculate the number of days since last use
+    foreach ($UserProfile in $UserProfiles) {
+        if (-not $UserProfile.LastUseTime) { continue }
+
+        # LastUseTime is a DMTF datetime string — must convert before comparing
+        $LastUseTime      = [Management.ManagementDateTimeConverter]::ToDateTime($UserProfile.LastUseTime)
         $DaysSinceLastUse = ($CurrentDate - $LastUseTime).Days
 
         if ($DaysSinceLastUse -ge $DaysInactive) {
-            Write-Host "Deleting profile for user:" $Profile.LocalPath "Last used:" $LastUseTime
-            Remove-WmiObject -InputObject $Profile
+            Write-Host "Deleting profile: $($UserProfile.LocalPath)  Last used: $LastUseTime"
+            $UserProfile.Delete()
         } else {
-            Write-Host "Profile for user:" $Profile.LocalPath "is still active, last used:" $LastUseTime
+            Write-Host "Active profile : $($UserProfile.LocalPath)  Last used: $LastUseTime"
         }
     }
 }

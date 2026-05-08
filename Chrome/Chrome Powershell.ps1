@@ -1,44 +1,48 @@
-﻿### PowerShell Script to Remotely Install Google Chrome latest Version via PSTools with CSV Input and Export Failures
+# Remotely install/update Google Chrome via PsExec with CSV input and failure export.
+# PsExec is used intentionally — WinRM/PSRemoting is not available in this environment.
 
-# Define variables
-$DownloadURL = "https://dl.google.com/chrome/install/GoogleChromeStandaloneEnterprise64.msi"  # Chrome official download link
-$InstallerName = "GoogleChromeStandaloneEnterprise64.msi"
-$Arguments = "/qn /norestart"  # Silent install arguments
-$InputCSV = "C:\Users\scarman\Downloads\ComputerList.csv"  # Path to CSV with computer names (Column: ComputerName)
-$FailedCSV = "C:\Users\scarman\Downloads\FailedComputers.csv"  # Path to export failed installations
-$LogFile = "C:\Users\scarman\Downloads\ChromeInstallLog.txt"  # Log file path
-$PSToolsPath = "C:\Sysinternals"  # Path to PSTools directory
-$FailedComputers = @()
+param (
+    [string]$DownloadURL  = "https://dl.google.com/chrome/install/GoogleChromeStandaloneEnterprise64.msi",
+    [string]$InstallerName = "GoogleChromeStandaloneEnterprise64.msi",
+    [string]$Arguments    = "/qn /norestart",
+    [string]$InputCSV     = "C:\Users\scarman\Downloads\ComputerList.csv",
+    [string]$FailedCSV    = "C:\Users\scarman\Downloads\FailedComputers.csv",
+    [string]$LogFile      = "C:\Users\scarman\Downloads\ChromeInstallLog.txt",
+    [string]$PSToolsPath  = "C:\Sysinternals"
+)
 
-# Function to log messages
-Function Write-Log {
+$script:FailedComputers = @()
+
+function Write-Log {
     param ([string]$Message)
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     "$Timestamp - $Message" | Out-File -Append -FilePath $LogFile
     Write-Host $Message
 }
 
-# Function to get the installed Chrome version
-Function Get-ChromeVersion {
+function Get-ChromeVersion {
     param ([string]$ComputerName)
+    # Read the registry remotely via the .NET API (DCOM — no WinRM needed)
     try {
-        $ChromeVersion = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-            $ChromePath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Google Chrome"
-            if (Test-Path $ChromePath) {
-                (Get-ItemProperty -Path $ChromePath).DisplayVersion
-            } else {
-                return $null
-            }
-        } -ErrorAction Stop
-        return $ChromeVersion
+        $remoteReg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine, $ComputerName)
+        $key = $remoteReg.OpenSubKey(
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Google Chrome')
+        if ($key) {
+            $ver = $key.GetValue('DisplayVersion')
+            $key.Close()
+            $remoteReg.Close()
+            return $ver
+        }
+        $remoteReg.Close()
+        return $null
     } catch {
         Write-Log "WARNING: Failed to retrieve Chrome version on ${ComputerName} - $_"
         return $null
     }
 }
 
-# Function to Install Chrome via PSTools
-Function Install-ChromePSTools {
+function Install-ChromePSTools {
     param (
         [string]$ComputerName,
         [string]$DownloadURL,
@@ -46,85 +50,92 @@ Function Install-ChromePSTools {
         [string]$InstallArguments,
         [string]$PSToolsPath
     )
-    
+
     Write-Log "Checking Chrome version on ${ComputerName}..."
     $CurrentVersion = Get-ChromeVersion -ComputerName $ComputerName
 
     if ($CurrentVersion) {
-        Write-Log "Current Chrome Version on ${ComputerName}: $CurrentVersion"
+        Write-Log "Current Chrome version on ${ComputerName}: $CurrentVersion"
     } else {
-        Write-Log "Chrome is not installed on ${ComputerName}. Proceeding with installation."
+        Write-Log "Chrome not installed on ${ComputerName}. Proceeding with installation."
     }
 
     Write-Log "Attempting to install/update Chrome on ${ComputerName}..."
     try {
-        # Download the installer if not already present
-        if (-not (Test-Path "$PSToolsPath\$InstallerName")) {
+        # Download installer to local PSTools folder if not already present
+        $LocalInstallerPath = Join-Path $PSToolsPath $InstallerName
+        if (-not (Test-Path $LocalInstallerPath)) {
             Write-Log "Downloading Chrome installer..."
-            Invoke-WebRequest -Uri $DownloadURL -OutFile "$PSToolsPath\$InstallerName" -ErrorAction Stop
-            Write-Log "Installer downloaded successfully."
+            Invoke-WebRequest -Uri $DownloadURL -OutFile $LocalInstallerPath -UseBasicParsing -ErrorAction Stop
+            Write-Log "Installer downloaded to $LocalInstallerPath"
         }
 
-        # Verify network connectivity
+        # Verify the remote machine is reachable
         if (-not (Test-Connection -ComputerName $ComputerName -Count 2 -Quiet)) {
             Write-Log "ERROR: ${ComputerName} is unreachable. Skipping."
-            $FailedComputers += $ComputerName
+            $script:FailedComputers += $ComputerName
             return
         }
 
-        # Copy the installer to the remote computer
-        Write-Log "Copying installer to ${ComputerName}..."
-        & "$PSToolsPath\psexec.exe" -accepteula \\$ComputerName cmd /c "mkdir C:\Temp" 2>&1 | Out-Null
-        & "$PSToolsPath\psexec.exe" -accepteula \\$ComputerName cmd /c "copy \\$env:COMPUTERNAME\$PSToolsPath\$InstallerName C:\Temp\$InstallerName" 2>&1 | Out-Null
-        
-        # Verify that the installer was copied successfully
-        $FileCheck = & "$PSToolsPath\psexec.exe" -accepteula \\$ComputerName cmd /c "if exist C:\Temp\$InstallerName echo Exists"
-        if ($FileCheck -notmatch "Exists") {
+        # Copy installer via admin share (\\host\C$\Temp) — no WinRM needed
+        $RemoteTempUNC = "\\$ComputerName\C$\Temp"
+        $RemoteInstallerUNC = "$RemoteTempUNC\$InstallerName"
+
+        Write-Log "Copying installer to ${ComputerName} via admin share..."
+        & "$PSToolsPath\psexec.exe" -accepteula "\\$ComputerName" cmd.exe /c "if not exist C:\Temp mkdir C:\Temp" 2>&1 | Out-Null
+        Copy-Item -Path $LocalInstallerPath -Destination $RemoteInstallerUNC -Force -ErrorAction Stop
+
+        # Verify the copy landed
+        if (-not (Test-Path $RemoteInstallerUNC)) {
             Write-Log "ERROR: Installer was not copied to ${ComputerName}. Skipping."
-            $FailedComputers += $ComputerName
+            $script:FailedComputers += $ComputerName
             return
         }
 
-        # Run the installer remotely and capture exit code
+        # Run the installer remotely via PsExec and capture the exit code
         Write-Log "Executing installation on ${ComputerName}..."
-        & "$PSToolsPath\psexec.exe" -accepteula \\$ComputerName cmd /c "msiexec /i C:\Temp\$InstallerName $InstallArguments" 2>&1 | Out-Null
+        & "$PSToolsPath\psexec.exe" -accepteula "\\$ComputerName" msiexec.exe /i "C:\Temp\$InstallerName" $InstallArguments 2>&1 | Out-Null
         $ExitCode = $LASTEXITCODE
 
-        # Verify installation success
         if ($ExitCode -eq 0) {
-            Write-Log "Chrome update process initiated successfully on ${ComputerName}."
-
-            # Validate update by checking version again
+            Write-Log "Chrome install initiated on ${ComputerName} (exit 0). Verifying version..."
             Start-Sleep -Seconds 10
             $UpdatedVersion = Get-ChromeVersion -ComputerName $ComputerName
-
             if ($UpdatedVersion -and ($UpdatedVersion -ne $CurrentVersion)) {
-                Write-Log "SUCCESS: Chrome successfully updated to version $UpdatedVersion on ${ComputerName}."
+                Write-Log "SUCCESS: Chrome updated to $UpdatedVersion on ${ComputerName}."
             } else {
-                Write-Log "ERROR: Chrome update may have failed on ${ComputerName}. Version remains $CurrentVersion."
-                $FailedComputers += $ComputerName
+                Write-Log "ERROR: Version unchanged on ${ComputerName} after install (still $CurrentVersion)."
+                $script:FailedComputers += $ComputerName
             }
         } else {
-            Write-Log "ERROR: Installation failed on ${ComputerName}. Exit code: $ExitCode"
-            $FailedComputers += $ComputerName
+            Write-Log "ERROR: Installation failed on ${ComputerName}. msiexec exit code: $ExitCode"
+            $script:FailedComputers += $ComputerName
         }
+
+        # Clean up the remote temp file
+        Remove-Item -Path $RemoteInstallerUNC -Force -ErrorAction SilentlyContinue
+
     } catch {
         Write-Log "ERROR: An error occurred while updating Chrome on ${ComputerName}: $_"
-        $FailedComputers += $ComputerName
+        $script:FailedComputers += $ComputerName
     }
 }
 
-# Main Execution Loop
+# Main
 Write-Log "Starting Google Chrome update process..."
 $ComputerList = Import-Csv -Path $InputCSV | Select-Object -ExpandProperty ComputerName
 
 foreach ($Computer in $ComputerList) {
-    Install-ChromePSTools -ComputerName $Computer -DownloadURL $DownloadURL -InstallerName $InstallerName -InstallArguments $Arguments -PSToolsPath $PSToolsPath
+    Install-ChromePSTools -ComputerName $Computer `
+                          -DownloadURL $DownloadURL `
+                          -InstallerName $InstallerName `
+                          -InstallArguments $Arguments `
+                          -PSToolsPath $PSToolsPath
 }
 
-# Export failed computers to CSV
-if ($FailedComputers.Count -gt 0) {
-    $FailedComputers | ForEach-Object { [PSCustomObject]@{ ComputerName = $_ } } | Export-Csv -Path $FailedCSV -NoTypeInformation -Force
+if ($script:FailedComputers.Count -gt 0) {
+    $script:FailedComputers | ForEach-Object { [PSCustomObject]@{ ComputerName = $_ } } |
+        Export-Csv -Path $FailedCSV -NoTypeInformation -Force
     Write-Log "Failed installations exported to $FailedCSV."
 } else {
     Write-Log "All installations completed successfully!"

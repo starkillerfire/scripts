@@ -1,12 +1,12 @@
-﻿# Define the path to the CSV file with the list of computers
-$csvPath = "C:\Users\scarman\Downloads\Laptops.csv"
+﻿param (
+    [string]$CsvPath          = "C:\Users\scarman\Downloads\Laptops.csv",
+    [int]   $MaxProfileAgeDays = 30
+)
 
-# Specify the maximum age (in days) of profiles to keep
-$maxProfileAgeDays = 30
-$cutoffDate = (Get-Date).AddDays(-$maxProfileAgeDays)
+$cutoffDate = (Get-Date).AddDays(-$MaxProfileAgeDays)
 
 # Import the list of computers from the CSV file
-$computers = Import-Csv -Path $csvPath
+$computers = Import-Csv -Path $CsvPath
 
 # Loop through each computer
 foreach ($computer in $computers) {
@@ -14,30 +14,29 @@ foreach ($computer in $computers) {
 
     Write-Output "Processing $computerName..."
 
-    # Test if the computer is reachable
-    if (Test-Connection -ComputerName $computerName -Count 1 -Quiet) {
-        try {
-            # Get the list of user profiles on the remote computer
-            $profiles = Get-WmiObject -Class Win32_UserProfile -ComputerName $computerName
-
-            foreach ($profile in $profiles) {
-                # Check if the profile has been used in the last 30 days
-                if ($profile.LastUseTime -lt $cutoffDate) {
-                    # Delete the profile if it's older than the specified time
-                    if ($profile.Special -eq $false) { # Skip system profiles
-                        $profilePath = $profile.LocalPath
-                        Write-Output "Deleting profile at $profilePath on $computerName..."
-
-                        # Delete the profile
-                        Remove-WmiObject -InputObject $profile
-                    }
-                }
-            }
-        } catch {
-            $errorMessage = $_.Exception.Message
-            Write-Output ("Error processing {0}: {1}" -f $computerName, $errorMessage)
-        }
-    } else {
+    if (-not (Test-Connection -ComputerName $computerName -Count 1 -Quiet)) {
         Write-Output "$computerName is not reachable."
+        continue
+    }
+
+    try {
+        # Get-WmiObject uses DCOM (RPC) — no WinRM required
+        $profiles = Get-WmiObject -Class Win32_UserProfile -ComputerName $computerName
+
+        foreach ($userProfile in $profiles) {
+            if ($userProfile.Special) { continue }   # skip built-in system profiles
+
+            # LastUseTime is a DMTF datetime string — must convert before comparing
+            if (-not $userProfile.LastUseTime) { continue }
+            $lastUse = [Management.ManagementDateTimeConverter]::ToDateTime($userProfile.LastUseTime)
+
+            if ($lastUse -lt $cutoffDate) {
+                $profilePath = $userProfile.LocalPath
+                Write-Output "Deleting profile at $profilePath on $computerName (last used $lastUse)..."
+                $userProfile.Delete()
+            }
+        }
+    } catch {
+        Write-Output ("Error processing {0}: {1}" -f $computerName, $_.Exception.Message)
     }
 }

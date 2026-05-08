@@ -18,7 +18,7 @@ foreach ($computer in $computers) {
     try {
         # Run PsExec to execute the registry command on the remote computer
         $process = Start-Process -FilePath $psexecPath `
-            -ArgumentList "\\$computerName -s cmd.exe /c $regCommand" `
+            -ArgumentList @("\\$computerName", '-s', 'cmd.exe', '/c', $regCommand) `
             -NoNewWindow -Wait -PassThru -ErrorAction Stop
 
         if ($process.ExitCode -eq 0) {
@@ -33,4 +33,4 @@ foreach ($computer in $computers) {
     }
 }
 
-Write-Host "Script completed." -ForegroundColor Pink
+Write-Host "Script completed." -ForegroundColor Magenta

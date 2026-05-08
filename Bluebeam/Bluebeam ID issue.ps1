@@ -13,7 +13,7 @@ References:
 
 [CmdletBinding()]
 param(
-  [string]$MinutesToCapture = "20"   # CAPI2 events timeframe
+  [int]$MinutesToCapture = 20   # CAPI2 events timeframe
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +52,7 @@ $readme | Set-Content (Join-Path $OutRoot "README.txt")
 
 # 2) Environment snapshot
 $EnvTxt = Join-Path $DiagDir "env.txt"
-$os = (Get-CimInstance Win32_OperatingSystem) 2>$null
+$os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 $bbApps = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
   ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
   Where-Object { $_.DisplayName -match "Bluebeam Revu" }
@@ -95,11 +95,11 @@ try {
 try { wevtutil sl "$capilog" /e:false | Out-Null } catch {}
 
 # 4) Cert & revocation diagnostics
-function Run-CmdOut($file, $cmd, $args) {
+function Invoke-CmdOut($file, $cmd, $Arguments) {
   $p = New-Object System.Diagnostics.Process
   $p.StartInfo = New-Object System.Diagnostics.ProcessStartInfo
   $p.StartInfo.FileName = $cmd
-  $p.StartInfo.Arguments = $args
+  $p.StartInfo.Arguments = $Arguments
   $p.StartInfo.RedirectStandardOutput = $true
   $p.StartInfo.RedirectStandardError  = $true
   $p.StartInfo.UseShellExecute = $false
@@ -112,24 +112,24 @@ function Run-CmdOut($file, $cmd, $args) {
 }
 
 # a) Current user's personal & intermediate stores
-Run-CmdOut (Join-Path $DiagDir "cert_store_user_my.txt")  "certutil.exe" "-user -store my"
-Run-CmdOut (Join-Path $DiagDir "cert_store_user_ca.txt")  "certutil.exe" "-user -store ca"
-Run-CmdOut (Join-Path $DiagDir "cert_store_user_root.txt") "certutil.exe" "-user -store root"
+Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_my.txt")  "certutil.exe" "-user -store my"
+Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_ca.txt")  "certutil.exe" "-user -store ca"
+Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_root.txt") "certutil.exe" "-user -store root"
 
 # b) LocalMachine stores (if admin)
 try {
-  Run-CmdOut (Join-Path $DiagDir "cert_store_lm_my.txt")   "certutil.exe" "-store my"
-  Run-CmdOut (Join-Path $DiagDir "cert_store_lm_ca.txt")   "certutil.exe" "-store ca"
-  Run-CmdOut (Join-Path $DiagDir "cert_store_lm_root.txt") "certutil.exe" "-store root"
+  Invoke-CmdOut (Join-Path $DiagDir "cert_store_lm_my.txt")   "certutil.exe" "-store my"
+  Invoke-CmdOut (Join-Path $DiagDir "cert_store_lm_ca.txt")   "certutil.exe" "-store ca"
+  Invoke-CmdOut (Join-Path $DiagDir "cert_store_lm_root.txt") "certutil.exe" "-store root"
 } catch { Warn "Could not read LocalMachine stores (need elevation). Skipping." }
 
 # c) Chain engine config & URL cache
-Run-CmdOut (Join-Path $DiagDir "cert_chain_config.txt") "certutil.exe" "-getreg chain"
-Run-CmdOut (Join-Path $DiagDir "cert_urlcache_list.txt") "certutil.exe" "-URLcache *"
+Invoke-CmdOut (Join-Path $DiagDir "cert_chain_config.txt") "certutil.exe" "-getreg chain"
+Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_list.txt") "certutil.exe" "-URLcache *"
 
 # (Optional) clear user CRL/URL cache AFTER we recorded it; comment out if not desired
 try {
-  Run-CmdOut (Join-Path $DiagDir "cert_urlcache_clear.txt") "certutil.exe" "-URLcache * delete"
+  Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_clear.txt") "certutil.exe" "-URLcache * delete"
 } catch { Warn "Could not clear URL cache (non-fatal)." }
 
 # 5) GPResult (to show no custom PKI policy)

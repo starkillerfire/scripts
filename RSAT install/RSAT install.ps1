@@ -12,7 +12,7 @@ $rsatFeatures = Get-WindowsCapability -Online | Where-Object {
     $_.Name -like "Rsat.*" -and $_.State -ne "Installed"
 }
 
-if ($rsatFeatures.Count -eq 0) {
+if (@($rsatFeatures).Count -eq 0) {
     Write-Host "All RSAT features are already installed." -ForegroundColor Green
     exit
 }

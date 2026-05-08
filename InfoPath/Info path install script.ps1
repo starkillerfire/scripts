@@ -70,11 +70,10 @@ function Test-InfoPathInstalled {
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
     )
     foreach ($key in $regKeys) {
-        Get-ChildItem $key -ErrorAction SilentlyContinue | ForEach-Object {
+        $found = Get-ChildItem $key -ErrorAction SilentlyContinue | ForEach-Object {
             try { (Get-ItemProperty $_.PSPath).DisplayName } catch {}
-        } | Where-Object { $_ -match 'Microsoft\s+InfoPath\s+2013' } | ForEach-Object {
-            return $true
-        }
+        } | Where-Object { $_ -match 'Microsoft\s+InfoPath\s+2013' }
+        if ($found) { return $true }
     }
 
     # --- file check --------------------------------------------------------
