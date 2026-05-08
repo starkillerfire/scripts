@@ -1,27 +1,21 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Discovers and removes broken Universal Print / cloud printers from the local Windows client.
 
 .DESCRIPTION
-    Scans all registry locations and the print spooler, then opens a selection window
-    grouped by printer name. Selecting a printer removes it from every registry location
-    automatically — no need to pick the same printer multiple times.
+    Scans all registry locations (including other user profiles) and the print spooler,
+    then opens a selection window grouped by printer name. Selecting a printer removes it
+    from every registry location automatically.
 
-    Additional safety and audit features:
-      - Registry keys are backed up to a .reg file before deletion (restorable by double-click)
+    Features:
+      - Auto-elevates to Administrator if not already running elevated
+      - Scans all loaded user profile hives (HKU), not just the current user
+      - Registry keys backed up to a .reg file before deletion (double-click to restore)
+      - Orphaned printer driver and port detection with optional cleanup
       - Full transcript log saved to %TEMP% for audit trail
-      - Orphaned printer driver detection and optional cleanup after removal
 
     Use this when a Universal Print printer GUID has changed (failed add, print server
     reconfiguration, connector update) and the locally-installed printer is stale or broken.
-
-    Locations scanned:
-      - Windows Print Spooler
-      - HKLM Cloud Print Provider  (GUID-keyed Universal Print entries)
-      - HKLM SYSTEM Spooler Printers
-      - HKLM Print Connections
-      - HKCU Devices / PrinterPorts / Printers\Connections
 
 .PARAMETER Force
     Skip confirmation prompts and reboot immediately. For scripted/unattended runs.
@@ -36,7 +30,27 @@ param(
     [switch]$Force
 )
 
+# ── Auto-elevation: relaunch as admin if needed ──────────────────────────────────
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+               [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    $scriptPath = $MyInvocation.MyCommand.Path
+    if ([string]::IsNullOrEmpty($scriptPath)) {
+        Write-Host "Cannot auto-elevate: script path unavailable." -ForegroundColor Red
+        Write-Host "Save the file to disk, then right-click > Run with PowerShell (as Administrator)." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+    Write-Host "Not running as Administrator — relaunching elevated..." -ForegroundColor Yellow
+    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    if ($Force) { $argList += " -Force" }
+    Start-Process powershell.exe -ArgumentList $argList -Verb RunAs
+    exit
+}
+
 # ── Colour helpers ───────────────────────────────────────────────────────────────
+Add-Type -AssemblyName PresentationFramework
+
 function Write-Info    ([string]$m) { Write-Host "[INFO]  $m" -ForegroundColor Cyan }
 function Write-OK      ([string]$m) { Write-Host "[OK]    $m" -ForegroundColor Green }
 function Write-Warn    ([string]$m) { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
@@ -44,19 +58,9 @@ function Write-Fail    ([string]$m) { Write-Host "[ERROR] $m" -ForegroundColor R
 function Write-Section ([string]$m) { Write-Host "`n=== $m ===" -ForegroundColor White }
 
 function Show-MsgBox {
-    param([string]$Message, [string]$Title = "UP Printer Cleanup", [string]$Buttons = "OKCancel",
-          [string]$Icon = "Question")
+    param([string]$Message, [string]$Title = "UP Printer Cleanup",
+          [string]$Buttons = "OKCancel", [string]$Icon = "Question")
     return [System.Windows.MessageBox]::Show($Message, $Title, $Buttons, $Icon)
-}
-
-# ── Admin guard ──────────────────────────────────────────────────────────────────
-Add-Type -AssemblyName PresentationFramework
-$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    [System.Windows.MessageBox]::Show(
-        "Please re-run this script as Administrator.`n(Right-click > Run as Administrator)",
-        "UP Printer Cleanup", "OK", "Error") | Out-Null
-    exit 1
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -75,14 +79,16 @@ $backupDir = "$env:TEMP\UPPrinterBackup_$stamp"
 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
 Write-Info "Reg backup : $backupDir"
 
-# Converts PS drive paths and PSPath format to reg.exe-compatible paths
+# Converts PS/PSPath formats to a path reg.exe understands
 function Get-RegExportPath ([string]$path) {
     $path `
         -replace 'Microsoft\.PowerShell\.Core\\Registry::', '' `
         -replace 'HKEY_LOCAL_MACHINE\\', 'HKLM\' `
         -replace 'HKEY_CURRENT_USER\\',  'HKCU\' `
+        -replace 'HKEY_USERS\\',         'HKU\'  `
         -replace '^HKLM:\\', 'HKLM\' `
-        -replace '^HKCU:\\', 'HKCU\'
+        -replace '^HKCU:\\', 'HKCU\' `
+        -replace '^HKU:\\',  'HKU\'
 }
 
 function Backup-RegKey ([string]$path) {
@@ -91,7 +97,7 @@ function Backup-RegKey ([string]$path) {
         $safeName   = ($regPath -replace '[\\:\{\}\s\(\)]', '_') -replace '_+', '_'
         $backupFile = Join-Path $backupDir "$safeName.reg"
         $null = & reg.exe export $regPath $backupFile /y 2>&1
-    } catch { }  # Backup failure must never block the removal
+    } catch { }  # Backup failure must never block removal
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -113,7 +119,38 @@ function Add-Entry {
     }) | Out-Null
 }
 
-# Spooler
+# Helper: scan the three per-user printer registry paths under any hive root
+function Read-UserHive {
+    param([string]$HiveRoot, [string]$SourceLabel)
+
+    $devPath  = "$HiveRoot\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Devices"
+    $portPath = "$HiveRoot\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PrinterPorts"
+    $connPath = "$HiveRoot\Printers\Connections"
+
+    if (Test-Path $devPath) {
+        foreach ($v in (Get-Item -Path $devPath -ErrorAction SilentlyContinue).GetValueNames()) {
+            Add-Entry -PrinterName $v -GUID '(value)' -Source "$SourceLabel Devices" `
+                      -RegPath "$devPath|$v" -EntryType 'Value'
+        }
+    }
+    if (Test-Path $portPath) {
+        foreach ($v in (Get-Item -Path $portPath -ErrorAction SilentlyContinue).GetValueNames()) {
+            Add-Entry -PrinterName $v -GUID '(value)' -Source "$SourceLabel PrinterPorts" `
+                      -RegPath "$portPath|$v" -EntryType 'Value'
+        }
+    }
+    if (Test-Path $connPath) {
+        Get-ChildItem -Path $connPath -ErrorAction SilentlyContinue | ForEach-Object {
+            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            $name  = if ($props.Printer) { $props.Printer } else { $_.PSChildName }
+            $guid  = if ($_.PSChildName -match '^\{') { $_.PSChildName } else { '(none)' }
+            Add-Entry -PrinterName $name -GUID $guid -Source "$SourceLabel Connections" `
+                      -RegPath $_.PSPath -EntryType 'Key'
+        }
+    }
+}
+
+# ── Print Spooler ────────────────────────────────────────────────────────────────
 try {
     Get-Printer -ErrorAction Stop | ForEach-Object {
         Add-Entry -PrinterName $_.Name -GUID '(spooler)' -Source 'Print Spooler' `
@@ -121,7 +158,7 @@ try {
     }
 } catch { Write-Warn "Could not query print spooler: $_" }
 
-# HKLM Cloud Print Provider (GUID-keyed Universal Print entries)
+# ── HKLM Cloud Print Provider (GUID-keyed Universal Print entries) ───────────────
 $cloudRoot = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Providers\Cloud Print Provider\Printers"
 if (Test-Path $cloudRoot) {
     Get-ChildItem -Path $cloudRoot -ErrorAction SilentlyContinue | ForEach-Object {
@@ -134,7 +171,7 @@ if (Test-Path $cloudRoot) {
     }
 } else { Write-Warn "HKLM Cloud Print Provider path not found." }
 
-# HKLM SYSTEM Spooler Printers
+# ── HKLM SYSTEM Spooler Printers ────────────────────────────────────────────────
 $sysSpooler = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers"
 if (Test-Path $sysSpooler) {
     Get-ChildItem -Path $sysSpooler -ErrorAction SilentlyContinue | ForEach-Object {
@@ -143,7 +180,7 @@ if (Test-Path $sysSpooler) {
     }
 }
 
-# HKLM Print Connections (machine-wide)
+# ── HKLM Print Connections (machine-wide) ───────────────────────────────────────
 $machConn = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Connections"
 if (Test-Path $machConn) {
     Get-ChildItem -Path $machConn -ErrorAction SilentlyContinue | ForEach-Object {
@@ -155,34 +192,37 @@ if (Test-Path $machConn) {
     }
 }
 
-# HKCU Devices (per-user)
-$hkcuDevices = "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Devices"
-if (Test-Path $hkcuDevices) {
-    foreach ($v in (Get-Item -Path $hkcuDevices -ErrorAction SilentlyContinue).GetValueNames()) {
-        Add-Entry -PrinterName $v -GUID '(value)' -Source 'HKCU Devices' `
-                  -RegPath "$hkcuDevices|$v" -EntryType 'Value'
-    }
+# ── HKCU — current user ──────────────────────────────────────────────────────────
+Read-UserHive -HiveRoot 'HKCU:' -SourceLabel 'HKCU'
+
+# ── HKU — all other loaded user profile hives ────────────────────────────────────
+Write-Info "Scanning other loaded user profile hives (HKU)..."
+if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
+    New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS -ErrorAction SilentlyContinue | Out-Null
 }
 
-# HKCU PrinterPorts (per-user)
-$hkcuPorts = "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PrinterPorts"
-if (Test-Path $hkcuPorts) {
-    foreach ($v in (Get-Item -Path $hkcuPorts -ErrorAction SilentlyContinue).GetValueNames()) {
-        Add-Entry -PrinterName $v -GUID '(value)' -Source 'HKCU PrinterPorts' `
-                  -RegPath "$hkcuPorts|$v" -EntryType 'Value'
-    }
-}
+$skipSids = @('S-1-5-18', 'S-1-5-19', 'S-1-5-20', '.DEFAULT')
 
-# HKCU Printers\Connections (per-user cloud/network connections)
-$hkcuConn = "HKCU:\Printers\Connections"
-if (Test-Path $hkcuConn) {
-    Get-ChildItem -Path $hkcuConn -ErrorAction SilentlyContinue | ForEach-Object {
-        $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
-        $name  = if ($props.Printer) { $props.Printer } else { $_.PSChildName }
-        $guid  = if ($_.PSChildName -match '^\{') { $_.PSChildName } else { '(none)' }
-        Add-Entry -PrinterName $name -GUID $guid `
-                  -Source 'HKCU Printers\Connections' -RegPath $_.PSPath -EntryType 'Key'
-    }
+Get-ChildItem -Path 'HKU:\' -ErrorAction SilentlyContinue | Where-Object {
+    $sid = $_.PSChildName
+    $sid -notin $skipSids -and $sid -notmatch '_Classes$'
+} | ForEach-Object {
+    $sid      = $_.PSChildName
+    $hkuRoot  = "HKU:\$sid"
+    $label    = "HKU\$sid"
+
+    # Resolve SID to a friendly username if possible
+    try {
+        $ntAccount = ([System.Security.Principal.SecurityIdentifier]$sid).Translate(
+                         [System.Security.Principal.NTAccount])
+        $label = "HKU\$($ntAccount.Value.Split('\')[-1])"
+    } catch { }
+
+    # Skip the current user — already covered by HKCU scan above
+    $currentSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+    if ($sid -eq $currentSid) { return }
+
+    Read-UserHive -HiveRoot $hkuRoot -SourceLabel $label
 }
 
 if ($inventory.Count -eq 0) {
@@ -216,7 +256,7 @@ $groupedRows = $inventory | Group-Object PrinterName | ForEach-Object {
 } | Sort-Object 'Printer Name'
 
 $selected = $groupedRows | Out-GridView `
-    -Title "UP Printer Cleanup — Select printer(s) to REMOVE then click OK  |  All registry locations removed automatically" `
+    -Title "UP Printer Cleanup — Select printer(s) to REMOVE then click OK  |  All locations cleaned automatically" `
     -PassThru
 
 if (-not $selected -or @($selected).Count -eq 0) {
@@ -244,17 +284,22 @@ if (-not $Force) {
     }
 }
 
-# ── Capture driver names before spooler entries are removed ──────────────────────
+# ── Capture driver + port names before spooler entries are removed ───────────────
 $driversUsedByRemoved = [System.Collections.Generic.List[string]]::new()
+$portsUsedByRemoved   = [System.Collections.Generic.List[string]]::new()
+
 foreach ($entry in @($toRemove)) {
     if ($entry.EntryType -eq 'Spooler') {
         $p = Get-Printer -Name $entry.PrinterName -ErrorAction SilentlyContinue
-        if ($p -and $p.DriverName) { $driversUsedByRemoved.Add($p.DriverName) | Out-Null }
+        if ($p) {
+            if ($p.DriverName) { $driversUsedByRemoved.Add($p.DriverName) | Out-Null }
+            if ($p.PortName)   { $portsUsedByRemoved.Add($p.PortName)     | Out-Null }
+        }
     }
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Remove selected entries (with registry backup before each delete)
+# STEP 3 — Remove selected entries (registry backed up before each delete)
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 3: Removing selected entries"
 
@@ -276,7 +321,7 @@ function Remove-RegKey ([string]$path, [string]$label) {
 }
 
 function Remove-RegValue ([string]$keyPath, [string]$valueName) {
-    Backup-RegKey $keyPath  # Back up parent key before removing value
+    Backup-RegKey $keyPath
     try {
         Remove-ItemProperty -Path $keyPath -Name $valueName -Force -ErrorAction Stop
         Write-OK "Removed value: $keyPath -> $valueName"
@@ -327,12 +372,9 @@ if ($uniqueDrivers.Count -gt 0) {
 
     if (@($orphanedDrivers).Count -gt 0) {
         Write-Info "Found $(@($orphanedDrivers).Count) orphaned driver(s) — opening selection window."
-        $driverRows = @($orphanedDrivers) | ForEach-Object {
-            [pscustomobject]@{ 'Driver Name' = $_ }
-        }
-        $selectedDrivers = $driverRows | Out-GridView `
-            -Title "Orphaned Printer Drivers — Select to remove (optional), or click Cancel to skip" `
-            -PassThru
+        $selectedDrivers = @($orphanedDrivers) |
+            ForEach-Object { [pscustomobject]@{ 'Driver Name' = $_ } } |
+            Out-GridView -Title "Orphaned Printer Drivers — Select to remove (optional), or Cancel to skip" -PassThru
 
         foreach ($d in @($selectedDrivers)) {
             try {
@@ -352,10 +394,50 @@ if ($uniqueDrivers.Count -gt 0) {
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 5 — Restart Print Spooler
-# Clears in-memory printer state and releases driver file locks before reboot.
+# STEP 5 — Orphaned printer port cleanup
 # ────────────────────────────────────────────────────────────────────────────────
-Write-Section "Step 5: Restarting Print Spooler"
+Write-Section "Step 5: Checking for orphaned printer ports"
+
+$uniquePorts = @($portsUsedByRemoved | Select-Object -Unique)
+if ($uniquePorts.Count -gt 0) {
+    $remainingPrinters = @(Get-Printer -ErrorAction SilentlyContinue)
+
+    # Skip built-in system ports that should never be removed
+    $systemPortPattern = '^(LPT\d*|COM\d*|USB\d*|FILE:|NUL:|PORTPROMPT:|XPS.*|OneNote.*|Microsoft.*)$'
+
+    $orphanedPorts = $uniquePorts | Where-Object {
+        $portName = $_
+        $portName -notmatch $systemPortPattern -and
+        -not ($remainingPrinters | Where-Object { $_.PortName -eq $portName })
+    }
+
+    if (@($orphanedPorts).Count -gt 0) {
+        Write-Info "Found $(@($orphanedPorts).Count) orphaned port(s) — opening selection window."
+        $selectedPorts = @($orphanedPorts) |
+            ForEach-Object { [pscustomobject]@{ 'Port Name' = $_ } } |
+            Out-GridView -Title "Orphaned Printer Ports — Select to remove (optional), or Cancel to skip" -PassThru
+
+        foreach ($port in @($selectedPorts)) {
+            try {
+                Remove-PrinterPort -Name $port.'Port Name' -ErrorAction Stop
+                Write-OK "Removed port: $($port.'Port Name')"
+                $removedItems.Add("Port: $($port.'Port Name')") | Out-Null
+            } catch {
+                Write-Fail "Could not remove port '$($port.'Port Name')': $_"
+                $failedItems.Add("Port: $($port.'Port Name')") | Out-Null
+            }
+        }
+    } else {
+        Write-OK "No orphaned ports found."
+    }
+} else {
+    Write-Info "No spooler entries removed — skipping port check."
+}
+
+# ────────────────────────────────────────────────────────────────────────────────
+# STEP 6 — Restart Print Spooler
+# ────────────────────────────────────────────────────────────────────────────────
+Write-Section "Step 6: Restarting Print Spooler"
 
 try {
     Write-Info "Stopping Spooler..."
@@ -407,14 +489,16 @@ if ($failedItems.Count -gt 0) {
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 6 — Reboot
+# STEP 7 — Reboot
 # Auto-schedules a reboot in 5 minutes. Prompt lets tech reboot now or cancel.
 # ────────────────────────────────────────────────────────────────────────────────
-Write-Section "Step 6: Reboot"
+Write-Section "Step 7: Reboot"
 
 Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
 
-if ($Force) {
+if ($removedItems.Count -eq 0) {
+    Write-Info "Nothing was removed — reboot not needed."
+} elseif ($Force) {
     Write-Info "Force mode — rebooting now."
     shutdown /r /t 0 /c "UP Printer Cleanup: forced reboot"
 } else {
