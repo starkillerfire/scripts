@@ -1,79 +1,112 @@
-﻿# Define input and output folders
-$preConversionFolder = "C:\Your\Path\PreConversion"
-$postConversionFolder = "C:\Your\Path\PostConversion"
-$logFile = "C:\Your\Path\conversion_log.txt"
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Convert .doc and .docm files to .docx and .pdf using Word COM interop.
 
-# Ensure the output folder exists
-if (!(Test-Path -Path $postConversionFolder)) {
-    New-Item -ItemType Directory -Path $postConversionFolder | Out-Null
+.PARAMETER InputFolder
+    Folder containing the source .doc / .docm files.
+
+.PARAMETER OutputFolder
+    Destination folder for converted .docx and .pdf files. Created if absent.
+
+.PARAMETER LogFile
+    Path to the conversion log. Defaults to conversion_log.txt inside OutputFolder.
+
+.EXAMPLE
+    .\Doc conversion.ps1 -InputFolder C:\Docs\Legacy -OutputFolder C:\Docs\Converted
+
+.EXAMPLE
+    .\Doc conversion.ps1 -InputFolder C:\Docs\Legacy -OutputFolder C:\Docs\Converted -LogFile C:\Logs\doc_convert.txt
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)] [string] $InputFolder,
+    [Parameter(Mandatory)] [string] $OutputFolder,
+    [string] $LogFile
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# Word SaveAs format constants
+$wdFormatDocumentDefault = 16   # .docx
+$wdFormatPDF             = 17   # .pdf
+
+if (-not (Test-Path $InputFolder))  { throw "Input folder not found: $InputFolder" }
+if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
+if (-not $LogFile) { $LogFile = Join-Path $OutputFolder 'conversion_log.txt' }
+
+function Write-Log {
+    param([string]$Message)
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
+    Write-Host $line
+    Add-Content -Path $LogFile -Value $line -Encoding UTF8
 }
 
-# Create or reset the log file
-New-Item -ItemType File -Path $logFile -Force | Out-Null
-Add-Content -Path $logFile -Value "Conversion Log - $(Get-Date)`n------------------------------------"
+Add-Content -Path $LogFile -Value ("Conversion Log - {0}`n{1}" -f (Get-Date), ('-' * 40)) -Encoding UTF8
+
+$files = Get-ChildItem -Path $InputFolder -Filter '*.doc*' |
+         Where-Object { $_.Extension -match '^(?i)\.doc(m?)$' }
+
+if ($files.Count -eq 0) {
+    Write-Log "No .doc/.docm files found in $InputFolder."
+    return
+}
+
+Write-Log "Found $($files.Count) file(s). Starting conversion..."
 
 $word = $null
 try {
     $word = New-Object -ComObject Word.Application
-    $word.Visible = $false  # Keep Word hidden
-
-    # Get all .doc and .docm files
-    $files = Get-ChildItem -Path $preConversionFolder -Filter "*.doc*" | Where-Object { $_.Extension -match "^(?i)\.doc(m?)$" }
+    $word.Visible = $false
 
     foreach ($file in $files) {
-        $docPath = [string]$file.FullName  # Ensure the path is explicitly a string
-        $docExtension = $file.Extension
-        $docxFileName = [string]($file.Name -replace "\.doc(m?)$", ".docx")
-        $docxPath = [string](Join-Path -Path $postConversionFolder -ChildPath $docxFileName)
-        $pdfPath = [string]($docxPath -replace "\.docx$", ".pdf")
+        $docxPath = Join-Path $OutputFolder ($file.BaseName + '.docx')
+        $pdfPath  = Join-Path $OutputFolder ($file.BaseName + '.pdf')
 
-        # Skip conversion if both .docx and .pdf already exist
         if ((Test-Path $docxPath) -and (Test-Path $pdfPath)) {
-            Write-Host "Skipping (Already Exists): $docxPath and $pdfPath" -ForegroundColor Yellow
-            Add-Content -Path $logFile -Value "SKIPPED: $docPath (Already Exists)"
+            Write-Log "SKIPPED (already exists): $($file.Name)"
             continue
         }
 
-        Write-Host "Processing: $docPath"
+        Write-Log "Processing: $($file.Name)"
+        $document = $null
+        try {
+            $document = $word.Documents.Open(
+                [ref][string]$file.FullName, [ref]$false, [ref]$true)
 
-        # Open the document in read-only mode
-        $document = $word.Documents.Open([ref] $docPath, [ref] $false, [ref] $true)
+            $document.Final = $false
+            $document.RemovePersonalInformation = $false
 
-        # Preserve metadata
-        $document.Final = $false
-        $document.RemovePersonalInformation = $false
+            if (-not (Test-Path $docxPath)) {
+                $document.SaveAs([ref]$docxPath, [ref]$wdFormatDocumentDefault)
+                Write-Log "  DOCX: $docxPath"
+            }
 
-        # Convert to .docx
-        if (!(Test-Path $docxPath)) {  # Ensure .docx doesn't already exist
-            $document.SaveAs([ref] $docxPath, [ref] 16)  # 16 = wdFormatDocumentDefault (.docx)
-            Write-Host "Converted to DOCX: $docxPath" -ForegroundColor Green
-            Add-Content -Path $logFile -Value "SUCCESS: Converted $docPath -> $docxPath"
+            $document.Close($false)
+            $document = $null
+
+            # Reopen the .docx to export as PDF
+            $document = $word.Documents.Open([ref]$docxPath, [ref]$false, [ref]$true)
+            if (-not (Test-Path $pdfPath)) {
+                $document.SaveAs([ref]$pdfPath, [ref]$wdFormatPDF)
+                Write-Log "  PDF:  $pdfPath"
+            }
+        } catch {
+            Write-Log "  ERROR: $($file.Name) - $($_.Exception.Message)"
+        } finally {
+            if ($null -ne $document) {
+                try { $document.Close($false) } catch {}
+                $document = $null
+            }
         }
-
-        # Close and reopen the new .docx to convert to PDF
-        $document.Close($false)
-        $document = $word.Documents.Open([ref] $docxPath, [ref] $false, [ref] $true)
-
-        # Convert the new .docx to PDF
-        if (!(Test-Path $pdfPath)) {  # Ensure PDF doesn't already exist
-            $document.SaveAs([ref] $pdfPath, [ref] 17)  # 17 = wdFormatPDF
-            Write-Host "Exported to PDF: $pdfPath" -ForegroundColor Cyan
-            Add-Content -Path $logFile -Value "SUCCESS: Converted $docxPath -> $pdfPath"
-        }
-
-        # Close the document
-        $document.Close($false)
     }
-} catch {
-    $errorMessage = "ERROR: $_"
-    Write-Host $errorMessage -ForegroundColor Red
-    Add-Content -Path $logFile -Value $errorMessage
 } finally {
-    # Ensure Word quits properly
-    if ($word -ne $null) {
-        $word.Quit()
-        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
+    if ($null -ne $word) {
+        try { $word.Quit() } catch {}
+        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+        $word = $null
     }
 }
 
-Write-Host "Conversion Completed! Log saved at: $logFile" -ForegroundColor Cyan
+Write-Log "Conversion complete. Log saved to: $LogFile"

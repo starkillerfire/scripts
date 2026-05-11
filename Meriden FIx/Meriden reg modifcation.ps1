@@ -1,69 +1,41 @@
-<# 
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+<#
 .SYNOPSIS
-  Sets WorkspaceDB=8 for Meridian client in both 64-bit and WOW6432Node registry paths.
-  Forces reboot after 5 minutes.
+    Set WorkspaceDB=8 for the AutoManager Meridian client in both 64-bit and WOW6432Node
+    registry paths, then schedule a reboot.
 
-.NOTES
-  Run from an elevated PowerShell prompt.
+.PARAMETER RebootDelaySecs
+    Seconds before the forced reboot. Default: 300 (5 minutes). Use 0 to skip reboot.
 #>
-
-[CmdletBinding()]
-param()
-
-# --- Require admin ---
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "This script must be run as Administrator."
-    exit 1
-}
-
-$targets = @(
-    "Cyco\AutoManager Meridian\CurrentVersion\Client",
-    "WOW6432Node\Cyco\AutoManager Meridian\CurrentVersion\Client"
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [int] $RebootDelaySecs = 300
 )
 
-$hive  = [Microsoft.Win32.RegistryHive]::LocalMachine
-$view  = [Microsoft.Win32.RegistryView]::Registry64
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-function Set-DwordValue {
-    param(
-        [Microsoft.Win32.RegistryKey]$rootKey,
-        [string]$relativePath,
-        [string]$name,
-        [int]$value
-    )
+$paths = @(
+    'HKLM:\SOFTWARE\Cyco\AutoManager Meridian\CurrentVersion\Client',
+    'HKLM:\SOFTWARE\WOW6432Node\Cyco\AutoManager Meridian\CurrentVersion\Client'
+)
 
-    $current = $rootKey.OpenSubKey("SOFTWARE", $true)
-    foreach ($part in $relativePath -split '\\') {
-        $next = $current.OpenSubKey($part, $true)
-        if (-not $next) { $next = $current.CreateSubKey($part) }
-        $current.Dispose()
-        $current = $next
+foreach ($path in $paths) {
+    if (-not (Test-Path $path)) {
+        New-Item -Path $path -Force | Out-Null
     }
-
-    $current.SetValue($name, $value, [Microsoft.Win32.RegistryValueKind]::DWord)
-    $current.Dispose()
+    Set-ItemProperty -Path $path -Name WorkspaceDB -Value 8 -Type DWord -Force
+    Write-Host "Set $path -> WorkspaceDB = 8" -ForegroundColor Green
 }
 
-try {
-    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
+Write-Host "Registry updated successfully." -ForegroundColor Green
 
-    foreach ($relPath in $targets) {
-        Set-DwordValue -rootKey $base -relativePath $relPath -name "WorkspaceDB" -value 8
-        Write-Host "Set HKLM\SOFTWARE\$relPath -> WorkspaceDB (DWORD) = 8"
+if ($RebootDelaySecs -gt 0) {
+    if ($PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Reboot in $RebootDelaySecs seconds")) {
+        Write-Warning "System will reboot in $RebootDelaySecs seconds..."
+        shutdown.exe /r /t $RebootDelaySecs /c "Meridian client registry update applied. Rebooting."
     }
-
-    $base.Dispose()
-
-    Write-Host "✅ Registry updated successfully."
-    Write-Host "⚠️ System will reboot in 5 minutes..."
-
-    # Schedule reboot in 5 minutes (300 seconds)
-    shutdown.exe /r /t 300 /c "System changes applied for Meridian Client. Rebooting in 5 minutes."
-
-    exit 0
-}
-catch {
-    Write-Error "Failed to update registry: $($_.Exception.Message)"
-    exit 2
+} else {
+    Write-Host "Reboot skipped (-RebootDelaySecs 0). Restart manually to apply changes." -ForegroundColor Yellow
 }

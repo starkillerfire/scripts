@@ -1,27 +1,103 @@
-﻿#######################################
-#You will need to have PSExec64.exe and robocopy.exe installed on your system. If they are in different locations that what is listed in the script
-#then you can chage the script or place a copy in the folders listed in the script.
-#Copy and paste the lines 3 to 16 into a powershell window. After the PSSession is started then copy and paste lines 18 to 35 into the same powershell session 
-#IMPORTANT!!!! Be sure to change the variable $Computer and the email address before running the script
-$Computers = Get-Content D:\Copy1\UpdateChrome.txt #UpdateChrome.txt  #"IBR1ABOURGOIL02"
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Remote Chrome silent installation via robocopy + PsExec.
 
-foreach ($Computer in $Computers) {
-    New-Item -Path "\\$Computer\c$\TempCH" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-    robocopy "\\ibr1pnrfs001\Everyone\Everyone\Patches\Chrome" "\\$Computer\C$\TempCH" /mir /R:2 /W:2
-    if ($LASTEXITCODE -ge 8) {
-        Write-Warning "Robocopy failed on $Computer (exit $LASTEXITCODE). Skipping install."
+.PARAMETER ComputerName
+    Single target computer name.
+
+.PARAMETER CsvPath
+    CSV file with a "ComputerName" column.
+
+.PARAMETER SourcePath
+    UNC or local path containing the Chrome MSI. No default — must be supplied.
+
+.PARAMETER PsExecPath
+    Path to PsExec.exe. Defaults to psexec.exe in the same folder as this script.
+
+.PARAMETER MsiName
+    MSI filename in SourcePath. Defaults to googlechromestandaloneenterprise64.msi.
+
+.PARAMETER TempDirName
+    Name of the staging folder created under C:\ on each remote machine. Defaults to TempCH.
+
+.EXAMPLE
+    .\ChromeInstall23.ps1 -CsvPath C:\computers.csv -SourcePath \\fileserver\patches\Chrome
+    .\ChromeInstall23.ps1 -ComputerName PC001 -SourcePath \\fileserver\patches\Chrome -WhatIf
+#>
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [string] $ComputerName,
+    [string] $CsvPath,
+    [Parameter(Mandatory)]
+    [string] $SourcePath,
+    [string] $PsExecPath  = (Join-Path $PSScriptRoot 'psexec.exe'),
+    [string] $MsiName     = 'googlechromestandaloneenterprise64.msi',
+    [string] $TempDirName = 'TempCH'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# --- Build computer list ---
+$computers = [System.Collections.Generic.List[string]]::new()
+if ($ComputerName) { $computers.Add($ComputerName) }
+if ($CsvPath)      { (Import-Csv -Path $CsvPath).ComputerName | ForEach-Object { $computers.Add($_) } }
+if ($computers.Count -eq 0) { throw 'Provide -ComputerName or -CsvPath.' }
+
+# --- Preflight checks ---
+if (-not (Test-Path $PsExecPath)) { throw "PsExec not found: $PsExecPath" }
+if (-not (Test-Path $SourcePath)) { throw "Source path not found: $SourcePath" }
+$msiFullPath = Join-Path $SourcePath $MsiName
+if (-not (Test-Path $msiFullPath)) { throw "MSI not found at: $msiFullPath" }
+
+$succeeded = [System.Collections.Generic.List[string]]::new()
+$failed    = [System.Collections.Generic.List[string]]::new()
+
+foreach ($computer in $computers) {
+    $uncTemp   = "\\$computer\c$\$TempDirName"
+    $remoteMsi = "C:\$TempDirName\$MsiName"
+
+    Write-Host "[$computer] Starting Chrome install..."
+
+    if (-not (Test-Connection -ComputerName $computer -Count 1 -Quiet)) {
+        Write-Warning "[$computer] Not reachable — skipping."
+        $failed.Add($computer)
         continue
     }
 
-    ./psexec  \\$Computer cmd /c "msiexec.exe /I C:\TempCH\googlechromestandaloneenterprise64.msi /qb"
-    ./psexec  \\$Computer cmd /c "C:\TempCH\netstop.bat"
-    Start-Sleep -Seconds 5
-    ./psexec  \\$Computer cmd /c "C:\TempCH\netstart.bat"
+    try {
+        New-Item -Path $uncTemp -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
 
-    Start-Sleep -Seconds 10
+        robocopy $SourcePath $uncTemp /mir /R:2 /W:2 | Out-Null
+        if ($LASTEXITCODE -ge 8) {
+            Write-Warning "[$computer] Robocopy failed (exit $LASTEXITCODE) — skipping."
+            $failed.Add($computer)
+            continue
+        }
 
-    Remove-Item -Path "\\$Computer\c$\TempCH" -Recurse -Force
+        if ($PSCmdlet.ShouldProcess($computer, 'Install Chrome via msiexec')) {
+            & $PsExecPath "\\$computer" -s -accepteula cmd /c "msiexec.exe /I `"$remoteMsi`" /qn /norestart" 2>$null
+            $rc = $LASTEXITCODE
+            if ($rc -in @(0, 3010)) {
+                Write-Host "[$computer] Chrome installed successfully (exit $rc)." -ForegroundColor Green
+                $succeeded.Add($computer)
+            } else {
+                Write-Warning "[$computer] msiexec returned exit code $rc."
+                $failed.Add($computer)
+            }
+        }
+    } catch {
+        Write-Warning "[$computer] Unexpected error: $_"
+        $failed.Add($computer)
+    } finally {
+        Remove-Item -Path $uncTemp -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
-
-
+Write-Host ""
+Write-Host "Summary: $($succeeded.Count) succeeded, $($failed.Count) failed."
+if ($failed.Count -gt 0) {
+    Write-Warning "Failed machines: $($failed -join ', ')"
+}

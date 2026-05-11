@@ -236,51 +236,74 @@ function Get-ErrorDescription {
 
 #### SCRIPT ENTRY POINT ####
 
+#Requires -RunAsAdministrator
+
+$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Error 'This script must be run as Administrator.'
+    exit 1
+}
+
 # Start Logging
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 Start-Transcript "C:\Windows\Logs\App_Failure_Remediation_$timestamp.log"
 
-# Get the failed Win32 app states
-$failedStates = Get-FailedWin32AppStates
+try {
+    # Get the failed Win32 app states
+    $failedStates = Get-FailedWin32AppStates
 
-# Process each failed state
-foreach ($state in $failedStates) {
-    # Parse the subkey path to extract User and App ID
-    $subKeyPath = $state.SubKeyPath -replace 'HKLM:\\', ''
-    $splitPath = $subKeyPath -split '\\'
-    $userObjectId = $splitPath[6]
-    $appId = $splitPath[7]
+    # Process each failed state
+    foreach ($state in $failedStates) {
+        try {
+            # Parse the subkey path to extract User and App ID
+            # Expected structure: SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\<userObjId>\<appId>\...
+            $subKeyPath = $state.SubKeyPath -replace 'HKLM:\\', ''
+            $splitPath  = $subKeyPath -split '\\'
 
-    # Get the username
-    $userName = Get-UsernameFromObjectID -ObjectID $userObjectId
- 
-    # Get the error description
-    $errorDescription = Get-ErrorDescription -errorCode $state.ErrorCode
+            # Index 6 = userObjectId, index 7 = appId (validate before accessing)
+            if ($splitPath.Count -lt 8) {
+                Write-Warning "Unexpected registry path structure (expected >=8 segments, got $($splitPath.Count)): $subKeyPath"
+                continue
+            }
 
-    # Output the formatted message
-    Write-Host "Installation of AppID: $appId failed for user $userName with error code: $($state.ErrorCode) - $errorDescription"
+            $userObjectId = $splitPath[6]
+            $appId        = $splitPath[7]
 
-    # Get the LastHashValue
-    $lastHashValue = Get-LastHashValue -userObjectId $userObjectId -appId $appId
+            if ([string]::IsNullOrWhiteSpace($userObjectId) -or [string]::IsNullOrWhiteSpace($appId)) {
+                Write-Warning "Could not extract userObjectId or appId from path: $subKeyPath"
+                continue
+            }
 
-    if ($lastHashValue) {
-        # Remove the registry keys including the GRS keys using LastHashValue
-        Remove-FailedAppRegistryKeys -userObjectId $userObjectId -appId $appId -lastHashValue $lastHashValue
+            # Get the username
+            $userName = Get-UsernameFromObjectID -ObjectID $userObjectId
+
+            # Get the error description
+            $errorDescription = Get-ErrorDescription -errorCode $state.ErrorCode
+
+            Write-Host "AppID: $appId failed for user $userName — error $($state.ErrorCode): $errorDescription"
+
+            # Get the LastHashValue and remove registry keys to force re-evaluation
+            $lastHashValue = Get-LastHashValue -userObjectId $userObjectId -appId $appId
+
+            if ($lastHashValue) {
+                Remove-FailedAppRegistryKeys -userObjectId $userObjectId -appId $appId -lastHashValue $lastHashValue
+            } else {
+                Remove-FailedAppRegistryKeys -userObjectId $userObjectId -appId $appId
+            }
+        } catch {
+            Write-Warning "Error processing state for $($state.SubKeyPath): $($_.Exception.Message)"
+        }
     }
-    else {
-        Remove-FailedAppRegistryKeys -userObjectId $userObjectId -appId $appId
+
+    # Restart the Intune Management Extension if any failures were remediated
+    if ($failedStates.Count -gt 0) {
+        Write-Host "Remediated $($failedStates.Count) failure(s). Restarting IntuneManagementExtension..."
+        Restart-Service -Name 'IntuneManagementExtension' -Force -PassThru
+    } else {
+        Write-Host "No failures detected."
     }
+} catch {
+    Write-Error "Unhandled error in remediation script: $($_.Exception.Message)"
+} finally {
+    Stop-Transcript
 }
-
-# If any failures were found, restart the Intune Management Extension
-if ($failedStates.Count -gt 0) {
-    Write-Host "Detected $($failedStates.Count) failures."
-    Write-Host "Restarting Intune Management Extension service..."
-    Restart-Service -Name 'IntuneManagementExtension' -Force -PassThru
-}
-
-if ($failedStates.Count -eq 0) {
-    Write-Host "No failures detected."
-} 
-
-Stop-Transcript
