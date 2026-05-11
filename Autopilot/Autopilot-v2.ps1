@@ -30,8 +30,17 @@
 	Author: jeromero@ios.doi.gov
 #>
 
+[CmdletBinding()]
+param()
+
 BEGIN {
     $script:shouldContinue = $true
+
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "This script must be run as Administrator." -ForegroundColor Red
+        $script:shouldContinue = $false
+        return
+    }
 
     $clientId = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
     $tenantId = "0693b5ba-4b18-4d7b-9341-f32f400a5494"
@@ -48,8 +57,62 @@ BEGIN {
         Write-Host "No internet connection detected. Please verify connection." -ForegroundColor Red
         $script:shouldContinue = $false
         return
-    } 
+    }
     Write-Verbose "Network connection verified."
+
+#region ConfigureDNS
+    $publicDnsServers = @(
+        # IPv4
+        "1.1.1.1",              # Cloudflare primary
+        "1.0.0.1",              # Cloudflare secondary
+        "8.8.8.8",              # Google primary
+        "8.8.4.4",              # Google secondary
+        "9.9.9.9",              # Quad9 primary
+        "149.112.112.112",      # Quad9 secondary
+        "208.67.222.222",       # OpenDNS primary
+        "208.67.220.220",       # OpenDNS secondary
+        # IPv6
+        "2606:4700:4700::1111", # Cloudflare primary
+        "2606:4700:4700::1001", # Cloudflare secondary
+        "2001:4860:4860::8888", # Google primary
+        "2001:4860:4860::8844", # Google secondary
+        "2620:fe::fe",          # Quad9 primary
+        "2620:fe::9",           # Quad9 secondary
+        "2620:119:35::35",      # OpenDNS primary
+        "2620:119:53::53"       # OpenDNS secondary
+    )
+
+    try {
+        $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+            Sort-Object -Property RouteMetric |
+            Select-Object -First 1
+
+        if ($defaultRoute) {
+            Set-DnsClientServerAddress -InterfaceIndex $defaultRoute.InterfaceIndex -ServerAddresses $publicDnsServers
+            Write-Verbose "Public DNS resolvers configured on interface index $($defaultRoute.InterfaceIndex)."
+        }
+        else {
+            $activeAdapters = Get-NetAdapter |
+                Where-Object { $_.Status -eq "Up" -and $_.InterfaceType -ne 24 -and $_.InterfaceType -ne 131 }
+            foreach ($adapter in $activeAdapters) {
+                Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $publicDnsServers
+            }
+            Write-Verbose "Public DNS resolvers configured on all active adapters."
+        }
+    }
+    catch {
+        Write-Host "Warning: Could not configure DNS resolvers: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+#endregion ConfigureDNS
+
+    $graphTest = Test-NetConnection -ComputerName "graph.microsoft.com" -Port 443 -WarningAction SilentlyContinue
+    if (-not $graphTest.TcpTestSucceeded) {
+        Write-Host "Cannot reach graph.microsoft.com:443. Please verify firewall or proxy settings." -ForegroundColor Red
+        $script:shouldContinue = $false
+        return
+    }
+    Write-Verbose "Microsoft Graph endpoint reachable."
 
     if ($PSVersionTable.PSVersion.Major -le 5) {
         if (-not ([System.Management.Automation.PSTypeName]'TrustAllCertsPolicy').Type) {
@@ -69,7 +132,12 @@ return true;
 
 #region installDependencies
     $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+    try {
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Warning: Could not set PSGallery as trusted: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 
     if ($nugetProvider) {
         Write-Verbose "NuGet PackageProvider is already installed (Version: $($nugetProvider.Version))"
@@ -266,7 +334,7 @@ Restart-Computer -Confirm
 PROCESS {
     if (-not $script:shouldContinue) { return }
 
-    $serialNumber = (Get-CimInstance -ClassName Win32_BIOS).SerialNumber
+    $serialNumber = ((Get-CimInstance -ClassName Win32_BIOS).SerialNumber).Trim()
     Write-Host "Serial Number: $serialNumber" -ForegroundColor Gray
     Write-Host ""    
 
@@ -299,15 +367,19 @@ PROCESS {
     $deviceName = ""
     $validName = $false
     while (-not $validName) {
-        $deviceName = Read-Host "Enter device name (must start with IBR, or press Enter to skip)"
+        $deviceName = Read-Host "Enter device name (must start with IBR, max 15 chars, or press Enter to skip)"
         if ($deviceName -eq "") {
             $validName = $true
         }
-        elseif ($deviceName.ToUpper().StartsWith("IBR")) {
-            $validName = $true
+        elseif (-not $deviceName.ToUpper().StartsWith("IBR")) {
+            Write-Host "Device name must start with IBR." -ForegroundColor Red
+        }
+        elseif ($deviceName.Length -gt 15) {
+            Write-Host "Device name must be 15 characters or fewer (entered: $($deviceName.Length))." -ForegroundColor Red
         }
         else {
-            Write-Host "Device name must start with IBR." -ForegroundColor Red
+            $deviceName = $deviceName.ToUpper()
+            $validName = $true
         }
     }
 
@@ -319,6 +391,7 @@ PROCESS {
     if (-not (Test-Path $csvPath)) {
         Write-Host ""
         Write-Host "Failed to generate hardware hash CSV. Cannot continue." -ForegroundColor Red
+        $script:shouldContinue = $false
         return
     }
     
@@ -326,18 +399,18 @@ PROCESS {
         $csvData = Import-Csv -Path $csvPath
 
         if ($csvData) {
-            $UpdatedCSVData = @()
+            $UpdatedCSVData = [System.Collections.Generic.List[object]]::new()
 
             foreach ($row in $csvData) {
                 $newRow = [ordered]@{
                     "Device Serial Number" = $serialNumber
                     "Windows Product ID"   = $row."Windows Product ID"
                     "Hardware Hash"        = $row."Hardware Hash"
-                    "Group Tag"            = $groupTag 
-                    "Assigned User"        = ""
+                    "Group Tag"            = $groupTag
+                    "Assigned User"        = "" # intentionally blank; user is assigned post-enrollment in Intune
                 }
 
-                $UpdatedCSVData += New-Object PSObject -Property $newRow
+                $UpdatedCSVData.Add((New-Object PSObject -Property $newRow))
             }
 
             $UpdatedCSVData | Export-Csv -Path $csvPath -NoTypeInformation -Force
@@ -378,6 +451,7 @@ END {
         if (-not $pollInterval) { $pollInterval = 5 }
         $maxWait = 600
         $elapsed = 0
+        $lastStatusPrint = 0
 
         while (-not $tokenAcquired -and $elapsed -lt $maxWait) {
             Start-Sleep -Seconds $pollInterval
@@ -396,7 +470,8 @@ END {
             catch {
                 $errorMessage = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
                 if ($errorMessage.error -eq "authorization_pending") {
-                    if ($elapsed % 60 -eq 0) {
+                    if (($elapsed - $lastStatusPrint) -ge 60) {
+                        $lastStatusPrint = $elapsed
                         $remaining = $maxWait - $elapsed
                         Write-Host "Waiting for authentication... ($remaining`s remaining)" -ForegroundColor Gray
                     }
@@ -436,7 +511,7 @@ END {
     $existingDevice = $null
 
     try {
-        $checkResult = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$serialNumber')" -Headers $headers
+        $checkResult = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$serialNumber')&`$top=999" -Headers $headers
         
         $exactMatches = @($checkResult.value | Where-Object { $_.serialNumber -eq $serialNumber })
 
@@ -472,7 +547,7 @@ END {
                         $deleteWait += 10
 
                         try {
-                            $recheck = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/$($existingDevice.id)" -Headers $headers
+                            Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/$($existingDevice.id)" -Headers $headers | Out-Null
                             if ($deleteWait % 60 -eq 0) {
                                 Write-Host ""
                                 Write-Host "  Still waiting... ($deleteWait`s elapsed)" -ForegroundColor Gray -NoNewline
@@ -555,7 +630,24 @@ END {
             hardwareIdentifier = $hardwareHash
         } | ConvertTo-Json
 
-        $importResult = Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/deviceManagement/importedWindowsAutopilotDeviceIdentities" -Headers $headers -Body $uploadBody
+        $uploadAttempt = 0
+        $importResult = $null
+        while ($uploadAttempt -lt 3 -and -not $importResult) {
+            $uploadAttempt++
+            try {
+                $importResult = Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/deviceManagement/importedWindowsAutopilotDeviceIdentities" -Headers $headers -Body $uploadBody
+            }
+            catch {
+                if ($uploadAttempt -lt 3) {
+                    Write-Host ""
+                    Write-Host "  Attempt $uploadAttempt failed, retrying in 10s..." -ForegroundColor Yellow -NoNewline
+                    Start-Sleep -Seconds 10
+                }
+                else {
+                    throw
+                }
+            }
+        }
         Write-Host "done" -ForegroundColor Green
     }
     catch {
@@ -581,18 +673,20 @@ END {
         $nameElapsed = 0
         $nameInterval = 15
         $autopilotDeviceId = $null
+        $lastNameStatusPrint = 0
 
         while (-not $autopilotDeviceId -and $nameElapsed -lt $maxNameWait) {
             Start-Sleep -Seconds $nameInterval
             $nameElapsed += $nameInterval
 
-            if ($nameElapsed % 60 -eq 0) {
+            if (($nameElapsed - $lastNameStatusPrint) -ge 60) {
+                $lastNameStatusPrint = $nameElapsed
                 Write-Host ""
                 Write-Host "  Still waiting for Intune... ($nameElapsed`s elapsed)" -ForegroundColor Gray -NoNewline
             }
 
             try {
-                $deviceLookup = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$serialNumber')" -Headers $headers
+                $deviceLookup = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$serialNumber')&`$top=999" -Headers $headers
 
                 $exactLookup = @($deviceLookup.value | Where-Object { $_.serialNumber -eq $serialNumber })
                 if ($exactLookup.Count -gt 0) {

@@ -1,32 +1,56 @@
-# Ensure the script is running as Administrator
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(`
-    [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Please run this script as Administrator." -ForegroundColor Red
-    exit
-}
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Install all missing RSAT features on the local machine.
+
+.PARAMETER Feature
+    Optional filter. Only install features whose name contains this string.
+    Example: -Feature DNS   installs only RSAT DNS tools.
+    Omit to install all missing RSAT features.
+
+.EXAMPLE
+    .\RSAT install.ps1
+    .\RSAT install.ps1 -Feature ActiveDirectory
+#>
+[CmdletBinding()]
+param(
+    [string] $Feature = ''
+)
+
+Set-StrictMode -Version Latest
 
 Write-Host "Scanning for RSAT features..." -ForegroundColor Cyan
 
-# Get all RSAT features that are not installed
-$rsatFeatures = Get-WindowsCapability -Online | Where-Object {
-    $_.Name -like "Rsat.*" -and $_.State -ne "Installed"
+$missing = Get-WindowsCapability -Online |
+    Where-Object {
+        $_.Name -like 'Rsat.*' -and
+        $_.State -notin @('Installed', 'InstallPending') -and
+        ($Feature -eq '' -or $_.Name -like "*$Feature*")
+    }
+
+if ($missing.Count -eq 0) {
+    Write-Host "All matching RSAT features are already installed." -ForegroundColor Green
+    exit 0
 }
 
-if (@($rsatFeatures).Count -eq 0) {
-    Write-Host "All RSAT features are already installed." -ForegroundColor Green
-    exit
-}
+Write-Host "Found $($missing.Count) feature(s) to install." -ForegroundColor Cyan
 
-# Install each RSAT feature
-foreach ($feature in $rsatFeatures) {
-    Write-Host "Installing $($feature.Name)..." -ForegroundColor Yellow
+$succeeded = 0
+$failed    = 0
+
+foreach ($cap in $missing) {
+    Write-Host "Installing $($cap.Name)..." -ForegroundColor Yellow
     try {
-        Add-WindowsCapability -Online -Name $feature.Name -ErrorAction Stop
-        Write-Host "$($feature.Name) installed successfully." -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to install $($feature.Name): $_" -ForegroundColor Red
+        Add-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+        Write-Host "  OK: $($cap.Name)" -ForegroundColor Green
+        $succeeded++
+    } catch {
+        Write-Warning "  FAILED: $($cap.Name) — $($_.Exception.Message)"
+        $failed++
     }
 }
 
-Write-Host "RSAT installation complete." -ForegroundColor Cyan
+Write-Host ""
+Write-Host "RSAT install complete — $succeeded succeeded, $failed failed." -ForegroundColor Cyan
+exit $(if ($failed -gt 0) { 1 } else { 0 })

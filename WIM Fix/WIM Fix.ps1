@@ -1,3 +1,5 @@
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Enterprise-grade script to repair and reset the WMI repository, re-register WMI components,
@@ -19,14 +21,16 @@
     Date: 2025-06-20
 #>
 
+[CmdletBinding()]
 param (
-    [switch]$Silent,
-    [switch]$NoReboot,
-    [switch]$UploadLog
+    [switch] $Silent,
+    [switch] $NoReboot,
+    [switch] $UploadLog,
+    [string] $LogFile        = 'C:\ProgramData\Logs\WMI_Repair_Log.txt',
+    [string] $CentralLogPath = '\\fileserver\logs$\WMIRepair'
 )
 
-$LogFile = "C:\WMI_Repair_Log.txt"
-$CentralLogPath = '\\fileserver\logs$\WMIRepair'
+Set-StrictMode -Version Latest
 
 function Write-Log {
     param (
@@ -40,15 +44,11 @@ function Write-Log {
 }
 
 # Start fresh log
+$logDir = Split-Path $LogFile
+if ($logDir -and -not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
 Remove-Item $LogFile -ErrorAction SilentlyContinue
-Start-Transcript -Path "C:\WMI_Repair_Transcript.txt" -Append
-
-# Check for admin rights
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Log "This script must be run as Administrator." "ERROR"
-    Stop-Transcript
-    exit 1
-}
+$transcriptPath = Join-Path (Split-Path $LogFile) 'WMI_Repair_Transcript.txt'
+Start-Transcript -Path $transcriptPath -Append
 
 # Exit on domain controllers
 try {
