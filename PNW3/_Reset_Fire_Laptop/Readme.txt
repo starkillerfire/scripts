@@ -1,0 +1,1 @@
+Drop folder on a thumbdrive. Run the .bat file and it will call the PowerShell script with bypass settings.
