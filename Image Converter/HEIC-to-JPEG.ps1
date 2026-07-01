@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Convert HEIC images to JPEG using WPF BitmapDecoder/Encoder.
@@ -15,7 +15,7 @@
     Defaults to a "JPEG" subfolder inside SourceFolder.
 
 .PARAMETER Quality
-    JPEG quality level (1–100). Default: 95.
+    JPEG quality level (1-100). Default: 95.
 
 .PARAMETER Recurse
     Search SourceFolder recursively for .heic files.
@@ -54,7 +54,7 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
 if (-not (Get-AppxPackage -Name Microsoft.HEIFImageExtension -ErrorAction SilentlyContinue)) {
-    Write-Host "HEIF Image Extensions not found — attempting winget install..."
+    Write-Host "HEIF Image Extensions not found - attempting winget install..."
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         throw "winget not available. Install HEIF Image Extensions manually from the Microsoft Store (search 'HEIF Image Extensions')."
     }
@@ -109,10 +109,10 @@ foreach ($file in $files) {
         Write-Host "Converted: $($file.Name)"
         $converted++
     } catch {
-        Write-Warning "Failed: $($file.Name) — $_"
+        Write-Warning "Failed: $($file.Name) - $_"
         $errored++
     }
 }
 
 Write-Host ""
-Write-Host "Done — $converted converted, $skipped skipped, $errored errors."
+Write-Host "Done - $converted converted, $skipped skipped, $errored errors."

@@ -1,4 +1,4 @@
-<# ======================================================================
+﻿<# ======================================================================
    SecureBoot-Mitigation_Win10.ps1  ·  v2025-06-18  ·  PowerShell 5.1
    Mitigates CVE-2023-24932 (BlackLotus) on Windows 10 21H2 / 22H2
    - Dynamic build gate           - Four Secure-Boot phases
@@ -16,6 +16,7 @@
     [switch]$PauseBetweenPhases,
     [switch]$UpdateWinRE,
     [string]$ExportRecoveryUSB,
+    [switch]$CheckForNewerBuildOnline,
     [string]$LogPath = [IO.Path]::Combine($env:SystemDrive,'Logs','CVE-2023-24932-Mitigation.log')
 )
 
@@ -39,14 +40,33 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 Start-Transcript -Path $LogPath -Append
 $ScriptStart = Get-Date
 
-# ── Dynamic build gate ────────────────────────────────────────────────────
+# ── Build gate ────────────────────────────────────────────────────────────
+# Pinned to the known-good fixed build for CVE-2023-24932 on Windows 10
+# 21H2/22H2 as of this script's last update. This used to scrape Microsoft's
+# support page for "the current fixed build" on every run, which is fragile
+# - a page redesign or wording change silently breaks the regex, and a bad
+# match could under- or over-gate this mitigation with no obvious symptom.
+# The pinned value below is authoritative by default. Pass
+# -CheckForNewerBuildOnline to additionally check that page for a build
+# number newer than the pinned one (e.g. if a later cumulative update also
+# addressed this and you want the gate raised accordingly) - the online
+# check can only raise the gate, never lower it below the pinned baseline.
+$PinnedMinBuild = [version]'19045.4651'
+
 function Get-FixedBuild {
+    if (-not $CheckForNewerBuildOnline) { return $PinnedMinBuild }
     $uri = 'https://support.microsoft.com/en-us/topic/41a975df-beb2-40c1-99a3-b3ff139f832d'
     try {
         $html = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 15
-        if ($html.Content -match '(19\d{3}\.\d{3,4})') { return [version]$Matches[1] }
-    } catch { Write-Log 'Build scrape failed; using 19045.4651' 'Warning' }
-    return [version]'19045.4651'
+        if ($html.Content -match '(19\d{3}\.\d{3,4})') {
+            $scraped = [version]$Matches[1]
+            if ($scraped -gt $PinnedMinBuild) {
+                Write-Log "Found a newer fixed build ($scraped) than the pinned baseline ($PinnedMinBuild) - using it." 'Information'
+                return $scraped
+            }
+        }
+    } catch { Write-Log "Build scrape failed; using pinned baseline $PinnedMinBuild" 'Warning' }
+    return $PinnedMinBuild
 }
 $MinBuild  = Get-FixedBuild
 $CurBuild  = [version](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber

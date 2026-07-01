@@ -1,4 +1,4 @@
-<# 
+﻿<# 
 Bluebeam Revu 21 Log Collector
 - Collects Revu logs
 - Enables CAPI2 logging, prompts you to reproduce, exports CAPI2 events, then disables
@@ -6,14 +6,15 @@ Bluebeam Revu 21 Log Collector
 - Zips everything into one file on your Desktop
 
 References:
-- Bluebeam logs & “Explore Log Folder” / Extended Debugging
+- Bluebeam logs & "Explore Log Folder" / Extended Debugging
 - Microsoft CAPI2 Operational logging
 - certutil -URLcache and -getreg chain
 #>
 
 [CmdletBinding()]
 param(
-  [int]$MinutesToCapture = 20   # CAPI2 events timeframe
+  [int]$MinutesToCapture = 20,   # CAPI2 events timeframe
+  [switch]$ClearUrlCache         # Opt-in: clear the user's CRL/URL cache after recording it
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,32 +68,41 @@ $($bbApps | Sort-Object DisplayName | Format-Table DisplayName, DisplayVersion, 
 
 # 3) CAPI2 logging (PKI chain & revocation trace)
 $capilog = "Microsoft-Windows-CAPI2/Operational"
+$capiEnabled = $false
 try {
   wevtutil sl "$capilog" /e:true | Out-Null
+  $capiEnabled = $true
   Ok "Enabled CAPI2 Operational logging."
 } catch { Warn "Could not enable CAPI2 logging (try running PowerShell as Administrator). Continuing." }
 
-Write-Host ""
-Write-Host ">>> Now reproduce the Bluebeam signing failure. When you're done, press ENTER to continue."
-Read-Host | Out-Null
-
-# Export recent CAPI2 events
 try {
-  $Since = (Get-Date).AddMinutes(-[int]$MinutesToCapture).ToString("o")
-  $Query = @"
+  Write-Host ""
+  Write-Host ">>> Now reproduce the Bluebeam signing failure. When you're done, press ENTER to continue."
+  Read-Host | Out-Null
+
+  # Export recent CAPI2 events
+  try {
+    $Since = (Get-Date).AddMinutes(-[int]$MinutesToCapture).ToString("o")
+    $Query = @"
 <QueryList>
   <Query Id="0" Path="$capilog">
     <Select>*[System[TimeCreated[@SystemTime >= '$Since']]]</Select>
   </Query>
 </QueryList>
 "@
-  $evtx = Join-Path $EvtDir "CAPI2_Recent.evtx"
-  wevtutil epl "$capilog" "$evtx" /q:"$Query" | Out-Null
-  Ok "Exported recent CAPI2 events → $evtx"
-} catch { Warn "CAPI2 export failed (insufficient rights or no events). You can export manually from Event Viewer." }
-
-# Disable CAPI2 again (best practice)
-try { wevtutil sl "$capilog" /e:false | Out-Null } catch {}
+    $evtx = Join-Path $EvtDir "CAPI2_Recent.evtx"
+    wevtutil epl "$capilog" "$evtx" /q:"$Query" | Out-Null
+    Ok "Exported recent CAPI2 events → $evtx"
+  } catch { Warn "CAPI2 export failed (insufficient rights or no events). You can export manually from Event Viewer." }
+} finally {
+  # This is the only place CAPI2 logging gets turned back off, so it needs
+  # to run even if the "reproduce the issue" prompt or the event export
+  # above throws unexpectedly - otherwise a single hiccup mid-script would
+  # leave verbose CAPI2 logging running indefinitely on the user's machine.
+  if ($capiEnabled) {
+    try { wevtutil sl "$capilog" /e:false | Out-Null } catch {}
+  }
+}
 
 # 4) Cert & revocation diagnostics
 function Invoke-CmdOut($file, $cmd, $Arguments) {
@@ -127,10 +137,14 @@ try {
 Invoke-CmdOut (Join-Path $DiagDir "cert_chain_config.txt") "certutil.exe" "-getreg chain"
 Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_list.txt") "certutil.exe" "-URLcache *"
 
-# (Optional) clear user CRL/URL cache AFTER we recorded it; comment out if not desired
-try {
-  Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_clear.txt") "certutil.exe" "-URLcache * delete"
-} catch { Warn "Could not clear URL cache (non-fatal)." }
+# (Optional) clear user CRL/URL cache AFTER we recorded it - opt-in via -ClearUrlCache
+if ($ClearUrlCache) {
+  try {
+    Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_clear.txt") "certutil.exe" "-URLcache * delete"
+  } catch { Warn "Could not clear URL cache (non-fatal)." }
+} else {
+  Info "Skipping URL cache clear (pass -ClearUrlCache to force fresh revocation checks)."
+}
 
 # 5) GPResult (to show no custom PKI policy)
 try {

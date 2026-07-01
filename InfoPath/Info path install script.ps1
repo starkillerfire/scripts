@@ -1,17 +1,17 @@
-<#
+﻿<#
 .SYNOPSIS
-    Silently installs (or repairs) Microsoft InfoPath 2013 SP1 on Windows 11.
+    Silently installs (or repairs) Microsoft InfoPath 2013 SP1 on Windows 11.
 
 .DESCRIPTION
-    • Detects x86/x64, enforces TLS 1.2+, retries flaky downloads  
-    • Verifies SHA‑256 and Microsoft Authenticode signature  
+    • Detects x86/x64, enforces TLS 1.2+, retries flaky downloads  
+    • Verifies SHA-256 and Microsoft Authenticode signature  
     • Skips install if InfoPath is already present (unless -Force)  
-    • Logs to file, transcript, and Windows Event Log  
-    • Returns 0 = success, 3010 = success‑with‑reboot, otherwise throws
+    • Logs to file, transcript, and Windows Event Log  
+    • Returns 0 = success, 3010 = success-with-reboot, otherwise throws
 
 .NOTES
     Author  : Samual Carman CPN-CCAO
-    Tested  : Windows 11 23H2, PowerShell 7.4 & 5.1
+    Tested  : Windows 11 23H2, PowerShell 7.4 & 5.1
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -23,7 +23,7 @@ param (
     [switch]$Force
 )
 
-# ─── Constants / pre‑flight ────────────────────────────────────────────────
+# ─── Constants / pre-flight ────────────────────────────────────────────────
 try { [Net.ServicePointManager]::SecurityProtocol = 3072 -bor 12288 }
 catch { [Net.ServicePointManager]::SecurityProtocol = 3072 }
 
@@ -81,8 +81,13 @@ function Test-InfoPathInstalled {
     $exePath   = Join-Path $progFiles 'Microsoft Office\Office15\INFOPATH.EXE'
     if (Test-Path $exePath) {
         if ($ExpectedVersion) {
-            $ver = (Get-Item $exePath).VersionInfo.ProductVersion
-            if ($ver -ge $ExpectedVersion) { return $true }
+            $verRaw = (Get-Item $exePath).VersionInfo.ProductVersion
+            try {
+                if ([version]$verRaw -ge [version]$ExpectedVersion) { return $true }
+            } catch {
+                # non-standard version string - fall back to a plain string compare instead of a wrong lexical one
+                if ($verRaw -eq $ExpectedVersion) { return $true }
+            }
         } else { return $true }
     }
     return $false
@@ -101,8 +106,8 @@ function Invoke-FileDownload {
             return
         } catch {
             if ($attempt -ge $MaxRetries) { throw }
-            $delay = [Math]::Pow(2,$attempt)       # 2,4,8 s
-            Write-Log "Download failed: $($_.Exception.Message). Retrying in $delay s…" 'WARN'
+            $delay = [Math]::Pow(2,$attempt)       # 2,4,8 s
+            Write-Log "Download failed: $($_.Exception.Message). Retrying in $delay s…" 'WARN'
             Start-Sleep -Seconds $delay
         }
     } while ($true)
@@ -113,9 +118,11 @@ function Test-FileHash {
     if ($Expected) {
         $actual = (Get-FileHash -Algorithm SHA256 -Path $Path).Hash
         if ($actual -ne $Expected.ToUpper()) {
-            throw "SHA‑256 mismatch! Expected $Expected but got $actual"
+            throw "SHA-256 mismatch! Expected $Expected but got $actual"
         }
-        Write-Log 'SHA‑256 hash verified.'
+        Write-Log 'SHA-256 hash verified.'
+    } else {
+        Write-Log 'No -ExpectedSha256 supplied; relying on Authenticode signature only.' 'WARN'
     }
 }
 
@@ -155,7 +162,7 @@ try {
     Write-Log "=== InfoPath deployment started (arch: $Arch) ==="
 
     if ((Test-InfoPathInstalled) -and -not $Force) {
-        Write-Log 'InfoPath already present – skipping installation.'
+        Write-Log 'InfoPath already present - skipping installation.'
         exit 0
     }
 

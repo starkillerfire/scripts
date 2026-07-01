@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Discovers and removes broken Universal Print / cloud printers from the local Windows client.
 
@@ -22,7 +22,7 @@
 
 .EXAMPLE
     .\Remove-UPPrinterFromClient.ps1
-    Opens the selection window — pick the printer(s) to remove, click OK.
+    Opens the selection window - pick the printer(s) to remove, click OK.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -41,7 +41,7 @@ if (-not $isAdmin) {
         Read-Host "Press Enter to exit"
         exit 1
     }
-    Write-Host "Not running as Administrator — relaunching elevated..." -ForegroundColor Yellow
+    Write-Host "Not running as Administrator - relaunching elevated..." -ForegroundColor Yellow
     $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
     if ($Force) { $argList += " -Force" }
     Start-Process powershell.exe -ArgumentList $argList -Verb RunAs
@@ -65,7 +65,7 @@ function Show-MsgBox {
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 
-Write-Host "`nUniversal Print — Client Printer Cleanup" -ForegroundColor White
+Write-Host "`nUniversal Print - Client Printer Cleanup" -ForegroundColor White
 Write-Info "Computer : $env:COMPUTERNAME"
 Write-Info "User     : $env:USERNAME"
 
@@ -101,9 +101,9 @@ function Backup-RegKey ([string]$path) {
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 1 — Discovery: scan every location and build a full inventory
+# STEP 1 - Discovery: scan every location and build a full inventory
 # ────────────────────────────────────────────────────────────────────────────────
-Write-Section "Step 1: Discovering all installed printers — please wait..."
+Write-Section "Step 1: Discovering all installed printers - please wait..."
 
 $inventory = [System.Collections.Generic.List[pscustomobject]]::new()
 
@@ -192,10 +192,10 @@ if (Test-Path $machConn) {
     }
 }
 
-# ── HKCU — current user ──────────────────────────────────────────────────────────
+# ── HKCU - current user ──────────────────────────────────────────────────────────
 Read-UserHive -HiveRoot 'HKCU:' -SourceLabel 'HKCU'
 
-# ── HKU — all other loaded user profile hives ────────────────────────────────────
+# ── HKU - all other loaded user profile hives ────────────────────────────────────
 Write-Info "Scanning other loaded user profile hives (HKU)..."
 if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
     New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS -ErrorAction SilentlyContinue | Out-Null
@@ -218,7 +218,7 @@ Get-ChildItem -Path 'HKU:\' -ErrorAction SilentlyContinue | Where-Object {
         $label = "HKU\$($ntAccount.Value.Split('\')[-1])"
     } catch { }
 
-    # Skip the current user — already covered by HKCU scan above
+    # Skip the current user - already covered by HKCU scan above
     $currentSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
     if ($sid -eq $currentSid) { return }
 
@@ -236,7 +236,7 @@ if ($inventory.Count -eq 0) {
 Write-OK "Found $($inventory.Count) entries across all locations."
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 2 — Selection: grouped by printer name (one row per printer)
+# STEP 2 - Selection: grouped by printer name (one row per printer)
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 2: Select printers to remove"
 Write-Info "Each row = one printer. Selecting it removes ALL registry locations for that printer."
@@ -256,7 +256,7 @@ $groupedRows = $inventory | Group-Object PrinterName | ForEach-Object {
 } | Sort-Object 'Printer Name'
 
 $selected = $groupedRows | Out-GridView `
-    -Title "UP Printer Cleanup — Select printer(s) to REMOVE then click OK  |  All locations cleaned automatically" `
+    -Title "UP Printer Cleanup - Select printer(s) to REMOVE then click OK  |  All locations cleaned automatically" `
     -PassThru
 
 if (-not $selected -or @($selected).Count -eq 0) {
@@ -299,7 +299,7 @@ foreach ($entry in @($toRemove)) {
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Remove selected entries (registry backed up before each delete)
+# STEP 3 - Remove selected entries (registry backed up before each delete)
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 3: Removing selected entries"
 
@@ -314,7 +314,7 @@ function Remove-RegKey ([string]$path, [string]$label) {
             Write-OK "Removed key  : $label"
             $removedItems.Add("RegKey: $label") | Out-Null
         } catch {
-            Write-Fail "Failed key   : $label — $_"
+            Write-Fail "Failed key   : $label - $_"
             $failedItems.Add("RegKey: $label") | Out-Null
         }
     }
@@ -327,7 +327,7 @@ function Remove-RegValue ([string]$keyPath, [string]$valueName) {
         Write-OK "Removed value: $keyPath -> $valueName"
         $removedItems.Add("RegValue: $keyPath\$valueName") | Out-Null
     } catch {
-        Write-Fail "Failed value : $keyPath -> $valueName — $_"
+        Write-Fail "Failed value : $keyPath -> $valueName - $_"
         $failedItems.Add("RegValue: $keyPath\$valueName") | Out-Null
     }
 }
@@ -348,7 +348,7 @@ foreach ($entry in @($toRemove)) {
         'Key' {
             if ($entry.RegPath) {
                 Remove-RegKey -path $entry.RegPath `
-                              -label "$($entry.Source) — $($entry.GUID) ($($entry.PrinterName))"
+                              -label "$($entry.Source) - $($entry.GUID) ($($entry.PrinterName))"
             }
         }
         'Value' {
@@ -359,7 +359,7 @@ foreach ($entry in @($toRemove)) {
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Orphaned printer driver cleanup
+# STEP 4 - Orphaned printer driver cleanup
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 4: Checking for orphaned printer drivers"
 
@@ -371,10 +371,10 @@ if ($uniqueDrivers.Count -gt 0) {
     }
 
     if (@($orphanedDrivers).Count -gt 0) {
-        Write-Info "Found $(@($orphanedDrivers).Count) orphaned driver(s) — opening selection window."
+        Write-Info "Found $(@($orphanedDrivers).Count) orphaned driver(s) - opening selection window."
         $selectedDrivers = @($orphanedDrivers) |
             ForEach-Object { [pscustomobject]@{ 'Driver Name' = $_ } } |
-            Out-GridView -Title "Orphaned Printer Drivers — Select to remove (optional), or Cancel to skip" -PassThru
+            Out-GridView -Title "Orphaned Printer Drivers - Select to remove (optional), or Cancel to skip" -PassThru
 
         foreach ($d in @($selectedDrivers)) {
             try {
@@ -390,11 +390,11 @@ if ($uniqueDrivers.Count -gt 0) {
         Write-OK "No orphaned drivers found."
     }
 } else {
-    Write-Info "No spooler entries removed — skipping driver check."
+    Write-Info "No spooler entries removed - skipping driver check."
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 5 — Orphaned printer port cleanup
+# STEP 5 - Orphaned printer port cleanup
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 5: Checking for orphaned printer ports"
 
@@ -412,10 +412,10 @@ if ($uniquePorts.Count -gt 0) {
     }
 
     if (@($orphanedPorts).Count -gt 0) {
-        Write-Info "Found $(@($orphanedPorts).Count) orphaned port(s) — opening selection window."
+        Write-Info "Found $(@($orphanedPorts).Count) orphaned port(s) - opening selection window."
         $selectedPorts = @($orphanedPorts) |
             ForEach-Object { [pscustomobject]@{ 'Port Name' = $_ } } |
-            Out-GridView -Title "Orphaned Printer Ports — Select to remove (optional), or Cancel to skip" -PassThru
+            Out-GridView -Title "Orphaned Printer Ports - Select to remove (optional), or Cancel to skip" -PassThru
 
         foreach ($port in @($selectedPorts)) {
             try {
@@ -431,11 +431,11 @@ if ($uniquePorts.Count -gt 0) {
         Write-OK "No orphaned ports found."
     }
 } else {
-    Write-Info "No spooler entries removed — skipping port check."
+    Write-Info "No spooler entries removed - skipping port check."
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 6 — Restart Print Spooler
+# STEP 6 - Restart Print Spooler
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 6: Restarting Print Spooler"
 
@@ -470,7 +470,7 @@ if ($failedItems.Count -gt 0) {
 $summaryIcon = if ($failedItems.Count -gt 0) { 'Warning' } else { 'Information' }
 [System.Windows.MessageBox]::Show(
     ($summaryLines -join "`n"),
-    "UP Printer Cleanup — Done",
+    "UP Printer Cleanup - Done",
     "OK",
     $summaryIcon
 ) | Out-Null
@@ -489,7 +489,7 @@ if ($failedItems.Count -gt 0) {
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP 7 — Reboot
+# STEP 7 - Reboot
 # Auto-schedules a reboot in 5 minutes. Prompt lets tech reboot now or cancel.
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 7: Reboot"
@@ -497,9 +497,9 @@ Write-Section "Step 7: Reboot"
 Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
 
 if ($removedItems.Count -eq 0) {
-    Write-Info "Nothing was removed — reboot not needed."
+    Write-Info "Nothing was removed - reboot not needed."
 } elseif ($Force) {
-    Write-Info "Force mode — rebooting now."
+    Write-Info "Force mode - rebooting now."
     shutdown /r /t 0 /c "UP Printer Cleanup: forced reboot"
 } else {
     shutdown /r /t 300 /c "UP Printer Cleanup: automatic reboot in 5 minutes to finish printer removal"
@@ -515,7 +515,7 @@ if ($removedItems.Count -eq 0) {
 
     $rebootAnswer = [System.Windows.MessageBox]::Show(
         $rebootMsg,
-        "Reboot Required — UP Printer Cleanup",
+        "Reboot Required - UP Printer Cleanup",
         "YesNoCancel",
         "Warning"
     )

@@ -48,7 +48,7 @@ REM ----------------------------------------------------------------
 net session >nul 2>&1
 if !errorlevel! neq 0 (
     echo [INFO] Administrator rights required. Requesting elevation...
-    powershell -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c \"\"%~f0\"\"' -Verb RunAs -Wait"
+    powershell -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c \"\"%~f0\"\" %*' -Verb RunAs -Wait"
     echo [INFO] Elevated session finished. Check the elevated window for results.
     exit /b 0
 )
@@ -91,13 +91,12 @@ REM Example: Uninstall-ezPivCard.bat -DryRun
 REM ----------------------------------------------------------------
 REM Exit handling
 REM ----------------------------------------------------------------
-REM Save errorlevel immediately — echo and pause both reset it to 0,
+REM Save errorlevel immediately - echo and pause both reset it to 0,
 REM so it must be captured before any output or prompting.
 set EXITCODE=!errorlevel!
 if !EXITCODE! neq 0 echo [ERROR] Script exited with code !EXITCODE!
 
-REM Keeps the window open so results are visible after an interactive run.
-REM Comment out or remove this line for automated/deployment use.
+REM Keeps the window open so results are visible after this interactive run.
 pause
 
 exit /b !EXITCODE!

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
@@ -52,6 +52,17 @@ if (-not (Test-Path $SourcePath)) { throw "Source path not found: $SourcePath" }
 $msiFullPath = Join-Path $SourcePath $MsiName
 if (-not (Test-Path $msiFullPath)) { throw "MSI not found at: $msiFullPath" }
 
+# Verify the MSI on the share is validly signed by Google before robocopying
+# it out to every machine in the list. $SourcePath is just a network share,
+# trusted only because it's "ours" - a compromised share or someone
+# accidentally dropping a tampered MSI there would otherwise get pushed out
+# to the whole fleet with no check at all.
+$msiSig = Get-AuthenticodeSignature -FilePath $msiFullPath
+if ($msiSig.Status -ne 'Valid' -or $msiSig.SignerCertificate.Subject -notmatch 'O=Google LLC') {
+    throw "MSI at $msiFullPath failed Authenticode validation (status: $($msiSig.Status)) - refusing to deploy it to any machine."
+}
+Write-Host "MSI Authenticode signature verified (Google LLC): $msiFullPath" -ForegroundColor Green
+
 $succeeded = [System.Collections.Generic.List[string]]::new()
 $failed    = [System.Collections.Generic.List[string]]::new()
 
@@ -78,13 +89,17 @@ foreach ($computer in $computers) {
         }
 
         if ($PSCmdlet.ShouldProcess($computer, 'Install Chrome via msiexec')) {
-            & $PsExecPath "\\$computer" -s -accepteula cmd /c "msiexec.exe /I `"$remoteMsi`" /qn /norestart" 2>$null
+            # Merge stderr into the output instead of discarding it, so a
+            # real failure still has diagnostic detail attached instead of
+            # just a bare exit code.
+            $psexecOutput = & $PsExecPath "\\$computer" -s -accepteula cmd /c "msiexec.exe /I `"$remoteMsi`" /qn /norestart" 2>&1
             $rc = $LASTEXITCODE
             if ($rc -in @(0, 3010)) {
                 Write-Host "[$computer] Chrome installed successfully (exit $rc)." -ForegroundColor Green
                 $succeeded.Add($computer)
             } else {
                 Write-Warning "[$computer] msiexec returned exit code $rc."
+                if ($psexecOutput) { Write-Warning "[$computer] PsExec output: $($psexecOutput -join ' | ')" }
                 $failed.Add($computer)
             }
         }
@@ -101,3 +116,4 @@ Write-Host "Summary: $($succeeded.Count) succeeded, $($failed.Count) failed."
 if ($failed.Count -gt 0) {
     Write-Warning "Failed machines: $($failed -join ', ')"
 }
+exit ($(if ($failed.Count -gt 0) { 1 } else { 0 }))

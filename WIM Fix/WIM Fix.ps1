@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
@@ -93,12 +93,12 @@ Start-Service winmgmt -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 5
 
 if (-not (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue)) {
-    Write-Log "WMI still unresponsive after salvage — performing hard reset." "WARN"
+    Write-Log "WMI still unresponsive after salvage - performing hard reset." "WARN"
     Stop-Service winmgmt -Force -ErrorAction SilentlyContinue
     cmd /c "winmgmt /resetrepository" | Out-Null
     Write-Log "WMI hard reset completed (exit $LASTEXITCODE)."
 } else {
-    Write-Log "WMI responsive after salvage — skipping hard reset."
+    Write-Log "WMI responsive after salvage - skipping hard reset."
 }
 
 # Register DLLs
@@ -107,7 +107,7 @@ $system32 = "$env:WINDIR\System32"
 foreach ($dll in $wmiDlls) {
     $dllPath = Join-Path $system32 "wbem\$dll"
     if (Test-Path $dllPath) {
-        # cmd /c never throws .NET exceptions — check $LASTEXITCODE instead
+        # cmd /c never throws .NET exceptions - check $LASTEXITCODE instead
         cmd /c "regsvr32 /s `"$dllPath`"" | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Log "Registered: $dll"
@@ -120,11 +120,12 @@ foreach ($dll in $wmiDlls) {
 # Recompile MOFs
 Push-Location "$env:WINDIR\System32\wbem"
 Get-ChildItem *.mof, *.mfl -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-        cmd /c "mofcomp `"$($_.FullName)`"" | Out-Null
+    # cmd /c never throws .NET exceptions - check $LASTEXITCODE instead
+    cmd /c "mofcomp `"$($_.FullName)`"" | Out-Null
+    if ($LASTEXITCODE -eq 0) {
         Write-Log "Compiled: $($_.Name)"
-    } catch {
-        Write-Log "Failed to compile: $($_.Name)" "WARN"
+    } else {
+        Write-Log "Failed to compile: $($_.Name) (mofcomp exit $LASTEXITCODE)" "WARN"
     }
 }
 Pop-Location
@@ -133,30 +134,34 @@ Pop-Location
 Start-Service winmgmt
 Write-Log "Started: winmgmt"
 
-# Retry wrapper (renamed to use approved verb)
+# Retries a command that returns a process exit code (DISM/SFC, both of
+# which can fail transiently - e.g. a momentarily locked file - and succeed
+# on a second try) up to $Max times, waiting $Delay seconds between
+# attempts. Returns whatever exit code the last attempt produced, whether
+# that's the success on a retry or the final failure once attempts run out.
 function Invoke-RetryCommand {
     param([scriptblock]$Cmd, [int]$Max = 3, [int]$Delay = 5)
     for ($i = 1; $i -le $Max; $i++) {
-        try {
-            & $Cmd; return $true
-        } catch {
-            Start-Sleep -Seconds $Delay
-        }
+        $result = & $Cmd
+        if ($result -eq 0) { return $result }
+        if ($i -lt $Max) { Start-Sleep -Seconds $Delay }
     }
-    return $false
+    return $result
 }
+
+$script:hadFailure = $false
 
 # DISM
 Write-Log "Running DISM..."
-$exitCode = (Start-Process DISM -ArgumentList "/Online","/Cleanup-Image","/RestoreHealth" -Wait -PassThru).ExitCode
+$exitCode = Invoke-RetryCommand -Cmd { (Start-Process DISM -ArgumentList "/Online","/Cleanup-Image","/RestoreHealth" -Wait -PassThru).ExitCode }
 Write-Log "DISM exit code: $exitCode"
-if ($exitCode -ne 0) { Write-Log "DISM failed." "ERROR" }
+if ($exitCode -ne 0) { Write-Log "DISM failed." "ERROR"; $script:hadFailure = $true }
 
 # SFC
 Write-Log "Running SFC..."
-$exitCode = (Start-Process sfc -ArgumentList "/scannow" -Wait -PassThru).ExitCode
+$exitCode = Invoke-RetryCommand -Cmd { (Start-Process sfc -ArgumentList "/scannow" -Wait -PassThru).ExitCode }
 Write-Log "SFC exit code: $exitCode"
-if ($exitCode -ne 0) { Write-Log "SFC encountered issues." "WARN" }
+if ($exitCode -ne 0) { Write-Log "SFC encountered issues." "WARN"; $script:hadFailure = $true }
 
 # Restart services
 foreach ($svc in $servicesToStop) {
@@ -187,3 +192,4 @@ if (-not $NoReboot) {
 }
 
 Stop-Transcript
+exit ($(if ($script:hadFailure) { 1 } else { 0 }))

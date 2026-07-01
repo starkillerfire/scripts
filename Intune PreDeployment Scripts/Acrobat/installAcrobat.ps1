@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -231,6 +231,12 @@ PROCESS {
             TimeStamp "Downloading VC++ 2013 x64..."
             try { Invoke-Download -Uri $vcUrl -OutFile $vcFile }
             catch { TimeStamp "ERROR downloading VC++ 2013: $_"; Exit-Script 1 }
+
+            $vcSig = Get-AuthenticodeSignature -FilePath $vcFile
+            if ($vcSig.Status -ne 'Valid' -or $vcSig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+                TimeStamp "ERROR - VC++ redistributable failed Authenticode validation (status: $($vcSig.Status)) - refusing to run it."
+                Exit-Script 1
+            }
             TimeStamp "Installing VC++ 2013 x64..."
             $vcExit = Invoke-Process -FilePath $vcFile -ArgumentList '/install /quiet /norestart' -TimeoutSeconds 300
             if ($vcExit -notin @(0, 3010)) {
@@ -291,6 +297,12 @@ PROCESS {
             $msi = Get-ChildItem $workDir -Recurse -Filter 'AcroPro.msi' | Select-Object -First 1
             if (!$msi) { TimeStamp "ERROR - AcroPro.msi not found after extraction."; Exit-Script 1 }
 
+            $msiSig = Get-AuthenticodeSignature -FilePath $msi.FullName
+            if ($msiSig.Status -ne 'Valid' -or $msiSig.SignerCertificate.Subject -notmatch 'O=Adobe') {
+                TimeStamp "ERROR - AcroPro.msi failed Authenticode validation (status: $($msiSig.Status)) - refusing to install it."
+                Exit-Script 1
+            }
+
             Stop-AcrobatProcesses
             TimeStamp "Installing Acrobat 64-bit base (silent)..."
             $msiExit = Invoke-Process -FilePath 'msiexec.exe' `
@@ -331,6 +343,20 @@ END {
         TimeStamp "Latest patch identified: $mspVer - downloading..."
         try { Invoke-Download -Uri $mspUrl -OutFile $mspPath }
         catch { TimeStamp "ERROR downloading patch: $_"; Exit-Script 1 }
+
+        # MSP patches aren't always Authenticode-signed by Adobe the way
+        # the base MSI is, so this can't hard-fail on "NotSigned" the way
+        # the checks above do without risking false failures on a
+        # legitimate patch. If a signature IS present, though, it must be
+        # valid and from Adobe - a present-but-invalid/wrong-publisher
+        # signature is a clear tamper signal worth stopping on.
+        $mspSig = Get-AuthenticodeSignature -FilePath $mspPath
+        if ($mspSig.Status -eq 'NotSigned') {
+            TimeStamp "WARNING - MSP patch $mspVer has no Authenticode signature to verify. Proceeding, but consider validating this download out-of-band."
+        } elseif ($mspSig.Status -ne 'Valid' -or $mspSig.SignerCertificate.Subject -notmatch 'O=Adobe') {
+            TimeStamp "ERROR - MSP patch failed Authenticode validation (status: $($mspSig.Status)) - refusing to apply it."
+            Exit-Script 1
+        }
 
         TimeStamp "Applying patch $mspVer..."
         $patchExit = Invoke-Process -FilePath 'msiexec.exe' `

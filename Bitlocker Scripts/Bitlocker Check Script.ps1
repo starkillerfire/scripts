@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
@@ -54,7 +54,7 @@ foreach ($row in (Import-Csv -Path $InputCsv)) {
         & $PsExecPath "\\$computer" -s -h -nobanner powershell.exe -ExecutionPolicy Bypass -Command $psCommand 2>&1 | Out-Null
 
         if (-not (Test-Path $uncOut)) {
-            Write-Warning "[$computer] Output file not found — BitLocker data unavailable."
+            Write-Warning "[$computer] Output file not found - BitLocker data unavailable."
             $results.Add([PSCustomObject]@{
                 ComputerName         = $computer
                 ProtectionStatus     = 'Not Available'

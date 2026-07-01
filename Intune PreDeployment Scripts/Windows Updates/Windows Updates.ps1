@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 [CmdletBinding()]
 param(
     [string]$LogDir='C:\ProgramData\UpdateAll\Logs',
@@ -58,14 +58,29 @@ if(-not(Test-IsAdministrator)){
 }
 
 if($SelfUpdateSource){
+    # ExpectedSha256 here is checked against THIS running script, not the
+    # download - it's there to make sure the copy currently executing
+    # hasn't been tampered with before it's trusted to fetch its own
+    # replacement. Refusing to proceed without it means a compromised or
+    # MITM'd SelfUpdateSource can't get unverified code to run just because
+    # nobody bothered to set the parameter. The replacement script itself
+    # can't be hash-pinned the same way since its hash legitimately changes
+    # with every release, so that one is checked via Authenticode below
+    # instead.
+    if(-not $ExpectedSha256){Stop-UpdateScript 'SelfUpdateSource set without ExpectedSha256 - refusing to self-update unverified code' 2}
     try{
         $curHash=(Get-FileHash $PSCommandPath -Algorithm SHA256).Hash
-        if($ExpectedSha256 -and $ExpectedSha256 -ne $curHash){Stop-UpdateScript 'SHA256 mismatch' 2}
+        if($ExpectedSha256 -ne $curHash){Stop-UpdateScript 'SHA256 mismatch' 2}
         $tmp="$env:TEMP\UpdateAll_latest.ps1"
         if($SelfUpdateSource -match '^https?://'){Invoke-WebRequest $SelfUpdateSource -OutFile $tmp -UseBasicParsing -TimeoutSec 30}
         else{Copy-Item $SelfUpdateSource $tmp -Force}
         $newHash=(Get-FileHash $tmp -Algorithm SHA256).Hash
         if($newHash -ne $curHash){
+            $sig=Get-AuthenticodeSignature $tmp
+            if($sig.Status -ne 'Valid'){
+                Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+                Stop-UpdateScript "Self-update package failed Authenticode validation (status: $($sig.Status)) - refusing to run it" 2
+            }
             Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`""
             exit
         }else{Remove-Item $tmp -Force}
@@ -138,12 +153,21 @@ function NeedReboot{
     try{$s=Get-WURebootStatus;return($s.RebootPending -or $s.WindowsUpdatePending)}catch{try{return(Test-PendingReboot)}catch{return $false}}
 }
 
+$resumeCountFile=Join-Path $LogDir 'ResumeCount.txt'
+$maxResumeAttempts=10
+$resumeCount=0
+if(Test-Path $resumeCountFile){$resumeCount=[int](Get-Content $resumeCountFile -ErrorAction SilentlyContinue)}
+
 $loop=$true
 while($loop){
-    $updates=Get-WindowsUpdate -MicrosoftUpdate -NotCategory 'Upgrades' -IgnoreReboot -AcceptAll -ErrorAction SilentlyContinue|
-             Where-Object{$_.KBArticleIDs -and($_.KBArticleIDs -notin $SkipKB)}
+    $rawUpdates=Get-WindowsUpdate -MicrosoftUpdate -NotCategory 'Upgrades' -IgnoreReboot -AcceptAll -ErrorAction SilentlyContinue|
+                Where-Object{$_.KBArticleIDs}
+    $updates=$rawUpdates|Where-Object{-not($_.KBArticleIDs|Where-Object{$_ -in $SkipKB})}
+    $excludedBySkipKB=$rawUpdates|Where-Object{$_.KBArticleIDs|Where-Object{$_ -in $SkipKB}}
+    if($excludedBySkipKB){$script:Skipped=$true}
+
     if($ForceKB){
-        $missing=$ForceKB|Where-Object{$_ -notin($updates.KBArticleIDs -join ',')}
+        $missing=$ForceKB|Where-Object{$_ -notin $updates.KBArticleIDs}
         if($missing){
             try{Install-WindowsUpdate -KBArticleID $missing -MicrosoftUpdate -AcceptAll -IgnoreReboot}catch{$script:HadErrors=$true}
         }
@@ -155,8 +179,6 @@ while($loop){
         $loop=$false
     }
 
-    if($updates -and ($updates.KBArticleIDs -match '.')){$script:Skipped=$true}
-
     if($LogEndpoint){
         try{
             $payload=@{Computer=$env:COMPUTERNAME;UTC=(Get-Date).ToUniversalTime();KBs=$updates.KBArticleIDs}|ConvertTo-Json
@@ -165,10 +187,16 @@ while($loop){
     }
 
     if(NeedReboot){
+        $resumeCount++
+        Set-Content -Path $resumeCountFile -Value $resumeCount
+        if($resumeCount -gt $maxResumeAttempts){
+            Stop-UpdateScript "Exceeded $maxResumeAttempts reboot/resume cycles without completing updates" 2
+        }
         Register-Resume
         Restart-Computer -Force
     }
 }
+Remove-Item $resumeCountFile -Force -ErrorAction SilentlyContinue
 
 if($WingetCatchUp){
     for($i=0;$i -lt 3;$i++){

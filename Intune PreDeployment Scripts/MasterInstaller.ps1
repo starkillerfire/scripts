@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Enterprise-grade installer / updater for Adobe Acrobat Reader, Google Chrome, Microsoft Edge,
     Dell Command Update, and Windows Updates.
@@ -31,16 +31,23 @@ param(
 
 Set-StrictMode -Version Latest
 
+# Sha256 is left blank on purpose for all three entries below. These
+# fallback scripts ship alongside this one in the repo - they aren't
+# downloaded at runtime - so there's nothing meaningful to pin a hash
+# against, and Invoke-FallbackScript's hash check only runs when Sha256 is
+# non-empty anyway. If a fallback target is ever changed to pull from an
+# external/downloaded source, put a real pinned hash here instead of
+# leaving it blank.
 $Products = @(
     @{ Name = 'Acrobat'; WingetId = 'Adobe.Acrobat.Reader.64-bit';
        Fallback = Join-Path $PSScriptRoot 'Acrobat/installAcrobat.ps1';
-       Sha256   = 'ADD_SHA256_FOR_ACROBAT_INSTALLER' },
+       Sha256   = ''; DisplayNamePattern = 'Adobe Acrobat Reader*' },
     @{ Name = 'Chrome' ; WingetId = 'Google.Chrome';
        Fallback = Join-Path $PSScriptRoot 'Chrome/installChrome.ps1';
-       Sha256   = 'ADD_SHA256_FOR_CHROME_INSTALLER'  },
+       Sha256   = ''; DisplayNamePattern = 'Google Chrome' },
     @{ Name = 'Edge'   ; WingetId = 'Microsoft.Edge';
-       Fallback = Join-Path $PSScriptRoot 'Edge/installEdge.ps1';
-       Sha256   = 'ADD_SHA256_FOR_EDGE_INSTALLER'    }
+       Fallback = Join-Path $PSScriptRoot 'Edge/Edge.ps1';
+       Sha256   = ''; DisplayNamePattern = 'Microsoft Edge' }
 )
 
 $LogPath     = Join-Path $PSScriptRoot 'master-install.log'
@@ -49,7 +56,7 @@ $EventSource = 'MasterInstaller'
 $MaxLogSize  = 1MB
 
 function Initialize-Logging {
-    if (Test-Path $LogPath -and (Get-Item $LogPath).Length -ge $MaxLogSize) {
+    if ((Test-Path $LogPath) -and (Get-Item $LogPath).Length -ge $MaxLogSize) {
         $backup = "$LogPath.$(Get-Date -Format 'yyyyMMddHHmmss').bak"
         Move-Item $LogPath $backup -Force
     }
@@ -140,7 +147,24 @@ function Invoke-FallbackScript {
 }
 
 function Get-InstalledVersion {
-    param([string] $Name)
+    # Chrome, Edge, and Acrobat are installed via MSI/EXE, not through a
+    # PackageManagement provider, so Get-Package by itself almost never
+    # finds them - the "already installed, skip" logic further down would
+    # never trigger and every run would attempt a redundant reinstall.
+    # Checking the uninstall registry keys first, and only falling back to
+    # Get-Package for providers that do register themselves, makes the
+    # detection actually work for these three products.
+    param([string] $Name, [string] $DisplayNamePattern)
+    if ($DisplayNamePattern) {
+        $uninstallPaths = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        )
+        $entry = Get-ItemProperty -Path $uninstallPaths -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like $DisplayNamePattern } |
+            Select-Object -First 1
+        if ($entry -and $entry.DisplayVersion) { return $entry.DisplayVersion }
+    }
     try {
         $pkg = Get-Package -Name $Name -ErrorAction Stop | Sort-Object Version -Descending | Select-Object -First 1
         return $pkg.Version
@@ -193,7 +217,7 @@ try {
         Write-Progress -Activity 'MasterInstaller' -Status "Processing $($product.Name)" -PercentComplete ([int](($index / $total) * 100))
         Write-Log -Level 'Information' -Message "=== Processing $($product.Name) ==="
 
-        $installed = Get-InstalledVersion -Name $product.Name
+        $installed = Get-InstalledVersion -Name $product.Name -DisplayNamePattern $product.DisplayNamePattern
         if ($installed) {
             Write-Log -Level 'Information' -Message "$($product.Name) already installed - version $installed"
             $summary[$product.Name] = @{ Status = 'AlreadyInstalled'; Version = "$installed" }
@@ -211,7 +235,7 @@ try {
         }
 
         if ($success) {
-            $ver = Get-InstalledVersion -Name $product.Name
+            $ver = Get-InstalledVersion -Name $product.Name -DisplayNamePattern $product.DisplayNamePattern
             Write-Log -Level 'Information' -Message "$($product.Name) installed - version $ver"
             $summary[$product.Name] = @{ Status = 'Installed'; Version = "$ver" }
         } else {

@@ -1,4 +1,4 @@
-<#---------------------------------------------------------------------------
+﻿<#---------------------------------------------------------------------------
 .SYNOPSIS
     Enterprise-grade Google Chrome installer / updater (v5.0.0, 2026-05-05)
 ---------------------------------------------------------------------------#>
@@ -42,7 +42,9 @@ if ([Environment]::OSVersion.Version.Build -lt $MinOsBuild) {
     exit 30
 }
 
-# Disk-space guard — use drive letter directly so check works before WorkingRoot is created
+Import-Module (Join-Path $PSScriptRoot '..\Common\BrowserDeploy.Common.psm1') -Force
+
+# Disk-space guard - use drive letter directly so check works before WorkingRoot is created
 try {
     $driveLetter = (Split-Path -Qualifier $WorkingRoot).TrimEnd(':')
     $freeGB      = [math]::Round((Get-PSDrive -Name $driveLetter -EA Stop).Free / 1GB, 2)
@@ -71,22 +73,13 @@ if (-not $Proxy) {
 }
 
 # Concurrency lock
-$LockPath = Join-Path $env:TEMP 'chrome-update.lock'
-try {
-    $LockStream = [System.IO.File]::Open(
-        $LockPath,
-        [System.IO.FileMode]::OpenOrCreate,
-        [System.IO.FileAccess]::ReadWrite,
-        [System.IO.FileShare]::None
-    )
-} catch {
+$LockPath   = Join-Path $env:TEMP 'chrome-update.lock'
+$LockStream = New-SingleInstanceLock -Path $LockPath
+if (-not $LockStream) {
     Write-Output 'Another Chrome-update instance is already running - exiting.'
     exit 0
 }
-function Close-Lock {
-    $LockStream.Close()
-    Remove-Item $LockPath -Force -EA SilentlyContinue
-}
+function Close-Lock { Close-SingleInstanceLock -LockStream $LockStream -Path $LockPath }
 
 ################################################################################
 # 1.  Logging and state                                                       #
@@ -104,27 +97,13 @@ $EventSrc   = 'Install-Chrome-Enterprise'
 New-Item $LogDir, $DlDir, $ArcDir -ItemType Directory -Force | Out-Null
 Start-Transcript -Path $LogPath -Append | Out-Null
 
-# Register event log source once at startup rather than inside every Write-Log call
-try {
-    if (-not [Diagnostics.EventLog]::SourceExists($EventSrc)) {
-        New-EventLog -LogName Application -Source $EventSrc
-    }
-} catch {}
-
 function Write-Log {
     param (
         [string]$Message,
         [ValidateSet('Information','Warning','Error')]
         [string]$Level = 'Information'
     )
-    $t   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $msg = "$t - $Message"
-    Write-Verbose     $msg
-    Write-Information $msg -InformationAction Continue
-    try {
-        Write-EventLog -LogName Application -Source $EventSrc `
-            -EntryType $Level -EventId 2201 -Message $Message -EA SilentlyContinue
-    } catch {}
+    Write-DeployLog -Message $Message -EventSource $EventSrc -EventId 2201 -Level $Level
 }
 
 # Trim old logs
@@ -149,73 +128,14 @@ if ($State.NextRetry -and (Get-Date) -lt [datetime]$State.NextRetry) {
 # 2.  Helper functions                                                        #
 ################################################################################
 
-# Cache architecture detection once — avoids repeated CIM queries throughout the script
+# Cache architecture detection once - avoids repeated CIM queries throughout the script
 $script:IsArm = (Get-CimInstance Win32_Processor).Architecture -eq 12
-
-function Get-BitsPriority {
-    $rx = (Get-NetAdapterStatistics |
-           Sort-Object ReceivedBytes -Descending |
-           Select-Object -First 1).ReceivedBytes
-    if ($rx -lt 2500000) { 'Background' } else { 'High' }
-}
-
-function Invoke-BitsDownload {
-    param ($Url, $Dest)
-    Import-Module BitsTransfer -EA Stop
-    $bitsArgs = @{
-        Source       = $Url
-        Destination  = $Dest
-        Priority     = (Get-BitsPriority)
-        Asynchronous = $true
-    }
-    # Thread the proxy through to BITS rather than always using AutoDetect
-    if ($Proxy) {
-        $bitsArgs.ProxyUsage = 'Override'
-        $bitsArgs.ProxyList  = $Proxy
-    } else {
-        $bitsArgs.ProxyUsage = 'AutoDetect'
-    }
-    $job = Start-BitsTransfer @bitsArgs
-
-    # Poll all active BITS states — the original only checked 'Transferring',
-    # causing the loop to exit early when a job was Queued or Connecting
-    $activeStates = @('Transferring', 'Queued', 'Connecting', 'TransientError', 'Suspended')
-    while ($job.JobState -in $activeStates) {
-        Start-Sleep 3
-        if ($job.JobState -eq 'TransientError') { Resume-BitsTransfer -BitsJob $job }
-    }
-    if ($job.JobState -eq 'Error') {
-        Remove-BitsTransfer -BitsJob $job
-        throw "BITS transfer failed: $($job.ErrorDescription)"
-    }
-    Complete-BitsTransfer -BitsJob $job
-}
 
 function Invoke-Download {
     param ($Url, $Dest, $Sha256)
-    $MaxAttempts = 3
-    for ($i = 1; $i -le $MaxAttempts; $i++) {
-        try {
-            # Delete existing file only when explicitly opting out of resume
-            if ($NoResume -and (Test-Path $Dest)) { Remove-Item $Dest -Force }
-            try { Invoke-BitsDownload -Url $Url -Dest $Dest }
-            catch {
-                Write-Log 'BITS unavailable - falling back to Invoke-WebRequest.' 'Warning'
-                $iw = @{ Uri=$Url; OutFile=$Dest; UseBasicParsing=$true }
-                if ($Proxy) { $iw.Proxy = $Proxy }
-                Invoke-WebRequest @iw -EA Stop
-            }
-            if (-not $NoHashCheck -and $Sha256) {
-                $calc = (Get-FileHash $Dest -Algorithm SHA256).Hash.ToUpper()
-                if ($calc -ne $Sha256.ToUpper()) { throw 'Hash mismatch' }
-            }
-            return
-        } catch {
-            Write-Log "Download attempt $i failed: $_" 'Warning'
-            if ($i -eq $MaxAttempts) { throw }
-            Start-Sleep -Seconds ([int][math]::Pow(2,$i))
-        }
-    }
+    Invoke-VerifiedDownload -Url $Url -Destination $Dest -Sha256 $Sha256 `
+        -Proxy $Proxy -NoHashCheck:$NoHashCheck -NoResume:$NoResume `
+        -LogAction { param($Message, $Level) Write-Log $Message $Level }
 }
 
 function Get-ChromeLatestInfo {
@@ -223,7 +143,7 @@ function Get-ChromeLatestInfo {
     $archKey = if ($script:IsArm) { 'win64-arm64' } else { 'win64' }
 
     $cache = Join-Path $env:TEMP "chrome-$archKey-$Channel.json"
-    if (Test-Path $cache -and (Get-Item $cache).LastWriteTime -gt (Get-Date).AddHours(-$CacheHours)) {
+    if ((Test-Path $cache) -and (Get-Item $cache).LastWriteTime -gt (Get-Date).AddHours(-$CacheHours)) {
         return Get-Content $cache -Raw | ConvertFrom-Json
     }
 
@@ -236,8 +156,9 @@ function Get-ChromeLatestInfo {
     $ver  = $json.versions | Select-Object -First 1
     $file = $ver.files     | Where-Object { $_.name -like '*.msi' } | Select-Object -First 1
 
+    $parsedVersion = try { [version]$ver.version } catch { [version]'0.0.0.0' }
     $info = [pscustomobject]@{
-        Version  = try { [version]$ver.version } catch { [version]'0.0.0.0' }
+        Version  = $parsedVersion
         Sha256   = $file.sha256
         FileName = $file.name
     }
@@ -287,7 +208,7 @@ Save-State 'Manifest'
 try { $Latest = Get-ChromeLatestInfo -Channel $Channel }
 catch { Write-Log "Manifest fetch failed: $_" 'Error'; Close-Lock; Stop-Transcript; exit 20 }
 
-# Check the property values (not the object) — $Latest is always a PSCustomObject after the try/catch
+# Check the property values (not the object) - $Latest is always a PSCustomObject after the try/catch
 $dlName = if ($Latest.FileName) {
     $Latest.FileName
 } elseif ($script:IsArm) {
@@ -321,7 +242,7 @@ if ($AuditOnly) {
 }
 
 ################################################################################
-# Main deployment — do/while ($false) lets 'break' serve as goto Finish      #
+# Main deployment - do/while ($false) lets 'break' serve as goto Finish      #
 ################################################################################
 do {
 
@@ -344,7 +265,7 @@ do {
         } | Select-Object -First 1
         if ($chromeKey) {
             $uninstallStr = (Get-ItemProperty $chromeKey.PSPath).UninstallString
-            # Parse exe and args safely — passing the raw string to cmd /c breaks on spaces/quotes
+            # Parse exe and args safely - passing the raw string to cmd /c breaks on spaces/quotes
             if ($uninstallStr -match '^"?([^"]+\.exe)"?\s*(.*)$') {
                 $unExe  = $Matches[1].Trim()
                 $unArgs = $Matches[2].Trim()
@@ -383,7 +304,7 @@ do {
             Save-State 'Done'
             break
         }
-        # winget failed — fall through to MSI
+        # winget failed - fall through to MSI
     }
 
     ##########################################################################
@@ -424,7 +345,7 @@ do {
     Write-Log "Install result: $($State.Result)"
     $State.Version = "$reqVer"
 
-    # Archive or remove the MSI — these are mutually exclusive; the original moved first
+    # Archive or remove the MSI - these are mutually exclusive; the original moved first
     # then tried to Remove-Item the already-moved file, making -Cleanup a no-op
     Save-State 'Archive'
     $dayDir = Join-Path $ArcDir (Get-Date -Format 'yyyyMMdd')

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
     .NOTES
@@ -217,18 +217,27 @@ function Test-PendingReboot {
 function Test-MSIBusy {
     <#
     .SYNOPSIS
-        Returns $true if another MSI install/uninstall is currently in progress.
-        Uses the Global\_MSIExecute mutex, which the Windows Installer holds
+        Returns 'Busy', 'NotBusy', or 'Unknown' for whether another MSI
+        install/uninstall is currently in progress. Uses the
+        Global\_MSIExecute mutex, which the Windows Installer holds
         exclusively during any active install or uninstall operation.
+
+    .DESCRIPTION
+        WaitHandleCannotBeOpenedException specifically means the mutex
+        doesn't exist right now - a real "not busy". Any other exception
+        (e.g. access denied opening it under a restrictive policy) means
+        the busy/not-busy state genuinely couldn't be determined, which is
+        a different thing from confirming it's not busy and shouldn't be
+        reported to the operator as if it were.
     #>
     try {
         $mutex = [System.Threading.Mutex]::OpenExisting('Global\_MSIExecute')
         $mutex.Dispose()
-        return $true   # Mutex exists: another MSI operation is running
+        return 'Busy'
     } catch [System.Threading.WaitHandleCannotBeOpenedException] {
-        return $false  # Mutex does not exist: no active MSI operation
+        return 'NotBusy'
     } catch {
-        return $false  # Any other error: assume not busy
+        return 'Unknown'
     }
 }
 
@@ -305,11 +314,19 @@ try {
         Write-Host '  Pending reboot : None' -ForegroundColor Green
     }
 
-    if (Test-MSIBusy) {
-        Write-Host '  WARNING: Another install/uninstall is currently in progress (MSI mutex held).' -ForegroundColor Yellow
-        Write-Host '           This uninstall may fail with exit code 1618. Consider retrying later.' -ForegroundColor Yellow
-    } else {
-        Write-Host '  MSI busy       : No other MSI operation running' -ForegroundColor Green
+    switch (Test-MSIBusy) {
+        'Busy' {
+            Write-Host '  WARNING: Another install/uninstall is currently in progress (MSI mutex held).' -ForegroundColor Yellow
+            Write-Host '           This uninstall may fail with exit code 1618. Consider retrying later.' -ForegroundColor Yellow
+        }
+        'Unknown' {
+            Write-Host '  WARNING: Could not determine whether another MSI operation is running' -ForegroundColor Yellow
+            Write-Host '           (mutex check failed, possibly a permissions restriction). If this' -ForegroundColor Yellow
+            Write-Host '           uninstall fails with exit code 1618, another MSI operation may be active.' -ForegroundColor Yellow
+        }
+        default {
+            Write-Host '  MSI busy       : No other MSI operation running' -ForegroundColor Green
+        }
     }
 
     #endregion

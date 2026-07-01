@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Comprehensive local Windows 11 DISA STIG remediation helper for post-SCAP/SCC remediation.
 
@@ -48,6 +48,17 @@
 param(
     [Parameter(Mandatory = $false)]
     [string]$ScapXmlPath,
+
+    # DISA's official SCAP benchmark exports carry an embedded XML digital
+    # signature (XMLDSig) - a different mechanism from Authenticode, since
+    # that doesn't apply to XML content. This script drives real
+    # registry/audit-policy changes from whatever SCAP XML it's given, so an
+    # unsigned or tampered file placed beside it would otherwise be trusted
+    # implicitly. Pass this to hard-fail when the loaded SCAP XML is missing
+    # a signature or the certificate chain doesn't validate, instead of just
+    # warning.
+    [Parameter(Mandatory = $false)]
+    [switch]$RequireSignedScap,
 
     [Parameter(Mandatory = $false)]
     [string]$OrgSettingsPath,
@@ -1328,10 +1339,83 @@ function Resolve-ScapXmlPath {
     throw 'SCAP XML was not supplied. Pass -ScapXmlPath or place the latest U_MS_Windows_11*_STIG_SCAP*.xml file beside this script.'
 }
 
+function Test-ScapXmlSignature {
+    <#
+    .SYNOPSIS
+        Verifies the embedded XML digital signature (XMLDSig) on a SCAP
+        benchmark file, when present, including whether the signing
+        certificate chains to a trusted root.
+
+    .DESCRIPTION
+        DISA's official SCAP benchmark exports are digitally signed inline
+        using the W3C XMLDSig standard (a <Signature> element within the
+        document) - a different mechanism from Authenticode, which doesn't
+        apply to XML content. This is the only thing standing between an
+        unsigned or tampered SCAP file placed beside this script and having
+        its contents trusted to drive real registry/audit-policy changes.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    [xml]$xmlDoc = Get-Content -LiteralPath $Path -Raw
+    $sigNode = $xmlDoc.GetElementsByTagName('Signature') |
+        Where-Object { $_.NamespaceURI -eq 'http://www.w3.org/2000/09/xmldsig#' } |
+        Select-Object -First 1
+
+    if (-not $sigNode) {
+        return [pscustomobject]@{ Signed = $false; Valid = $false; Message = 'No embedded XML digital signature found in this SCAP file.' }
+    }
+
+    try {
+        Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
+
+        $signedXml = New-Object System.Security.Cryptography.Xml.SignedXml($xmlDoc)
+        $signedXml.LoadXml($sigNode)
+
+        $cert = $null
+        foreach ($clause in $signedXml.KeyInfo) {
+            if ($clause -is [System.Security.Cryptography.Xml.KeyInfoX509Data]) {
+                $cert = $clause.Certificates | Select-Object -First 1
+                break
+            }
+        }
+
+        if (-not $signedXml.CheckSignature()) {
+            return [pscustomobject]@{ Signed = $true; Valid = $false; Message = 'XML signature check failed - the document does not match its embedded signature.' }
+        }
+
+        if (-not $cert) {
+            return [pscustomobject]@{ Signed = $true; Valid = $false; Message = 'Signature is cryptographically valid, but no certificate was found in KeyInfo to verify trust against.' }
+        }
+
+        $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+        if (-not $chain.Build($cert)) {
+            $statuses = ($chain.ChainStatus | ForEach-Object { $_.StatusInformation.Trim() }) -join '; '
+            return [pscustomobject]@{ Signed = $true; Valid = $false; Message = "Signature is valid, but the certificate chain does not validate: $statuses" }
+        }
+
+        return [pscustomobject]@{ Signed = $true; Valid = $true; Message = "Signature verified. Signer: $($cert.Subject)" }
+    } catch {
+        return [pscustomobject]@{ Signed = $true; Valid = $false; Message = "Error while verifying signature: $($_.Exception.Message)" }
+    }
+}
+
 function Import-ScapContent {
     param([Parameter(Mandatory)][string]$Path)
 
     $script:LoadedScapXmlPath = $Path
+
+    $sigResult = Test-ScapXmlSignature -Path $Path
+    if ($sigResult.Valid) {
+        Write-Host "SCAP XML signature: VERIFIED - $($sigResult.Message)" -ForegroundColor Green
+    } elseif ($RequireSignedScap) {
+        throw "SCAP XML failed signature verification and -RequireSignedScap was specified: $($sigResult.Message)"
+    } elseif ($sigResult.Signed) {
+        Write-Host "WARNING: SCAP XML has a signature that failed verification: $($sigResult.Message)" -ForegroundColor Red
+        Write-Host "Proceeding without -RequireSignedScap, but treat this file as unverified." -ForegroundColor Red
+    } else {
+        Write-Host "WARNING: SCAP XML is not digitally signed. Proceeding, but this file's origin/integrity is unverified." -ForegroundColor Yellow
+    }
+
     Write-Section "Loading SCAP XML: $Path"
     [xml]$xml = Get-Content -LiteralPath $Path -Raw
     $benchmark = $xml.SelectSingleNode("//*[local-name()='Benchmark']")
@@ -1696,7 +1780,7 @@ function Invoke-PowerStigBaseline {
     if ($SkipPowerSTIG) { return }
     Write-Section 'Applying PowerSTIG DSC baseline when available'
 
-    # DSC push mode requires WinRM — enable it if not already running
+    # DSC push mode requires WinRM - enable it if not already running
     try {
         Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop | Out-Null
         if (-not (Get-NetFirewallRule -Name 'Allow-WSMan-AllProfiles' -ErrorAction SilentlyContinue)) {
@@ -1965,7 +2049,7 @@ By using this IS (which includes any device attached to this IS), you consent to
     try { Invoke-NativeCommand -FilePath netsh.exe -ArgumentList @('interface', 'portproxy', 'reset') -IgnoreExitCode | Out-Null }
     catch { Add-OutstandingItem "Unable to reset netsh portproxy entries: $($_.Exception.Message)" }
 
-    # Event log minimum sizes — V-253337 (Application), V-253338 (Security), V-253339 (System)
+    # Event log minimum sizes - V-253337 (Application), V-253338 (Security), V-253339 (System)
     # MaxSize is in bytes: 32 MB for Application/System, 1 GB for Security
     foreach ($evtLog in @('Application', 'System')) {
         Set-StigRegistryValue -Path "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Eventlog\$evtLog" -Name 'MaxSize' -Type DWord -Value 33554432

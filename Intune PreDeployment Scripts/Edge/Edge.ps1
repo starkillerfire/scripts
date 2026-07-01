@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Enterprise-grade Microsoft Edge (Chromium) installer / updater - Windows 11 (PowerShell 5.x)
     Version 3.3  (2025-06-12)
@@ -76,6 +76,8 @@ if ($VerboseLog) { $PSDefaultParameterValues['*:Verbose'] = $true }
 if ([Environment]::OSVersion.Version.Build -lt $MinOsBuild) {
     Write-Error "OS build too old (<$MinOsBuild). Aborting."; exit [DeployExit]::OtherError }
 
+Import-Module (Join-Path $PSScriptRoot '..\Common\BrowserDeploy.Common.psm1') -Force
+
 $sslProto = [System.Net.SecurityProtocolType]::Tls12
 try { $sslProto = $sslProto -bor [System.Net.SecurityProtocolType]::Tls13 } catch {}
 [System.Net.ServicePointManager]::SecurityProtocol = $sslProto
@@ -89,65 +91,25 @@ if (-not $Proxy) {
 
 ######################### 3. SINGLE-INSTANCE LOCK ############################
 
-$LockFile = Join-Path $env:TEMP 'edge-update.lock'
-try { $LockStream = [System.IO.File]::Open($LockFile,'CreateNew','ReadWrite','None') }
-catch { Write-Output 'Another Edge update already running. Exiting.'; exit [DeployExit]::Success }
-function Close-Lock { if ($LockStream) { $LockStream.Close(); Remove-Item $LockFile -Force -EA SilentlyContinue } }
+$LockFile   = Join-Path $env:TEMP 'edge-update.lock'
+$LockStream = New-SingleInstanceLock -Path $LockFile
+if (-not $LockStream) { Write-Output 'Another Edge update already running. Exiting.'; exit [DeployExit]::Success }
+function Close-Lock { Close-SingleInstanceLock -LockStream $LockStream -Path $LockFile }
 
 ######################### 4. HELPER FUNCTIONS ###############################
 
 function Write-Log {
     param([string]$Message,[int]$EventId,[ValidateSet('Information','Warning','Error')][string]$Level='Information')
-    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $msg   = "$stamp $Message"
-    switch ($Level) { 'Error' {Write-Error $msg}; 'Warning' {Write-Warning $msg}; default {Write-Verbose $msg} }
-    Write-Information $msg
-    try {
-        if (-not [Diagnostics.EventLog]::SourceExists($EventSource)) { New-EventLog -LogName Application -Source $EventSource }
-        Write-EventLog -LogName Application -Source $EventSource -EventId $EventId -EntryType $Level -Message $Message -ErrorAction SilentlyContinue
-    } catch {}
-}
-
-function Get-BitsPriority {
-    $isVpn = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'VPN' -or $_.Name -match 'VPN' }
-    if ($isVpn) { return 'Foreground' }
-
-    $rx = (Get-NetAdapterStatistics | Sort-Object ReceivedBytes -Descending | Select-Object -First 1).ReceivedBytes
-    if ($rx -lt 2500000) { return 'Low' } else { return 'High' }
+    Write-DeployLog -Message $Message -EventSource $EventSource -EventId $EventId -Level $Level
 }
 
 function Invoke-EdgeDownload {
     param([string]$Url,[string]$Dest,[string]$Sha256)
-    $max = 3
-    for ($try = 1; $try -le $max; $try++) {
-        try {
-            if (-not $NoResume -and (Test-Path $Dest)) { Remove-Item $Dest -Force }
-            Import-Module BitsTransfer -ErrorAction SilentlyContinue
-            $priority = Get-BitsPriority
-            $job = Start-BitsTransfer -Source $Url -Destination $Dest -Priority $priority -ProxyUsage AutoDetect -Asynchronous
-            while ($job.JobState -eq 'Transferring') {
-                Start-Sleep 3
-                $metered = (Get-NetConnectionProfile | Where-Object {$_.IsConnected}).IsMetered
-                if ($metered) { Suspend-BitsTransfer $job } else { Resume-BitsTransfer $job }
-            }
-            Complete-BitsTransfer $job
-        } catch {
-            if ($_.FullyQualifiedErrorId -like '*Bits*' -and $try -eq $max) {
-                Write-Log 'BITS failed, falling back to Invoke-WebRequest.' $EvtDLFail 'Warning'
-                Invoke-WebRequest -Uri $Url -OutFile $Dest -Proxy $Proxy -UseBasicParsing -ErrorAction Stop
-            } else {
-                Write-Log "Download attempt $try failed: $_" $EvtDLFail 'Warning'
-                if ($try -eq $max) { throw }
-                Start-Sleep ([math]::Pow(2,$try))
-                continue
-            }
-        }
-        if (-not $NoHashCheck -and $Sha256) {
-            $calc = (Get-FileHash $Dest -Algorithm SHA256).Hash.ToUpper()
-            if ($calc -ne $Sha256.ToUpper()) { throw 'Hash mismatch' }
-        }
-        return
-    }
+    # -CheckVpnForBitsPriority preserves this script's original VPN-aware
+    # priority selection (prefer Foreground on a VPN link).
+    Invoke-VerifiedDownload -Url $Url -Destination $Dest -Sha256 $Sha256 `
+        -Proxy $Proxy -NoHashCheck:$NoHashCheck -NoResume:$NoResume -CheckVpnForBitsPriority `
+        -LogAction { param($Message, $Level) Write-Log $Message $EvtDLFail $Level }
 }
 
 ############################# 5. MAIN #######################################

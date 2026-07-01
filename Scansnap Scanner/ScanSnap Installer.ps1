@@ -1,16 +1,16 @@
-<#
+﻿<#
 .SYNOPSIS
-    Fully silent ScanSnap Home v2.22.2 installer—no GUI at any stage.
+    Fully silent ScanSnap Home v2.22.2 installer-no GUI at any stage.
 .DESCRIPTION
     1. Downloads the offline installer.
     2. Uses /extract_all to unpack it (silent).
     3. Installs VC++ 2013 & 2017 redists.
     4. Runs every ScanSnap component with its .ISS file:
-         /s        – silent
-         /SMS       wait + suppress pop‑ups
-         /f1 <iss>  feed response file (auto‑accept EULA, default paths)
-         /f2 <log>  per‑component log
-    5. Cleans up (unless –KeepFiles is passed).
+         /s        - silent
+         /SMS       wait + suppress pop-ups
+         /f1 <iss>  feed response file (auto-accept EULA, default paths)
+         /f2 <log>  per-component log
+    5. Cleans up (unless -KeepFiles is passed).
     Logs aggregate installer output to %TEMP%.
 #>
 
@@ -28,13 +28,13 @@ $ProgressPreference    = 'SilentlyContinue'
 $exePath = Join-Path $WorkFolder 'ScanSnapOffline.exe'
 $logRoot = Join-Path $env:TEMP  ("ScanSnapHome-Install-{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
 
-# --- Self‑elevate ------------------------------------------------------
+# --- Self-elevate ------------------------------------------------------
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     # Prefer pwsh (PS7) when available, fall back to Windows PowerShell
     $elevatedExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
-    Start-Process $elevatedExe "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    return
+    $elevatedProc = Start-Process $elevatedExe "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs -Wait -PassThru
+    exit $elevatedProc.ExitCode
 }
 
 try {
@@ -42,13 +42,23 @@ try {
     New-Item $WorkFolder -ItemType Directory -Force | Out-Null
     Invoke-WebRequest $SourceUrl -OutFile $exePath -UseBasicParsing
 
+    # Verify the downloaded installer is validly signed by PFU/Fujitsu (the
+    # ScanSnap publisher) before extracting and running anything from it -
+    # $SourceUrl is a third-party origin outside Microsoft/Google's CDNs,
+    # with no integrity check on this download otherwise.
+    $sig = Get-AuthenticodeSignature -FilePath $exePath
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'PFU|Fujitsu') {
+        throw "Downloaded installer failed Authenticode validation (status: $($sig.Status); signer: $($sig.SignerCertificate.Subject)) - refusing to run it."
+    }
+    Write-Host "Installer Authenticode signature verified: $($sig.SignerCertificate.Subject)" -ForegroundColor Green
+
     # 2. Silent extraction (no GUI, no install)
     Start-Process -FilePath $exePath `
         -ArgumentList "/extract_all=`"$WorkFolder`"","/hide_progress" `
         -WindowStyle Hidden -Wait
 
     $root = Join-Path $WorkFolder 'SSHomeDownloadInstaller'
-    if (-not (Test-Path $root)) { throw 'Extraction failed—SSHomeDownloadInstaller not found.' }
+    if (-not (Test-Path $root)) { throw 'Extraction failed-SSHomeDownloadInstaller not found.' }
 
     # 3. VC++ prerequisites
     foreach ($vc in 'ms_vcredist_x86_2013','ms_vcredist_x86_2017') {
@@ -63,7 +73,7 @@ try {
     foreach ($pkg in $payloads) {
         $issPath = Join-Path $pkg.DirectoryName ($pkg.BaseName + '.iss')
         if (-not (Test-Path $issPath)) {
-            Write-Warning "No ISS file for $($pkg.Name) – skipping"
+            Write-Warning "No ISS file for $($pkg.Name) - skipping"
             continue
         }
         $silentArgs = @('/s','/SMS',"/f1`"$issPath`"","/f2`"$logRoot`"")
@@ -71,12 +81,16 @@ try {
         if ($proc.ExitCode -ne 0) { throw "$($pkg.Name) exited with $($proc.ExitCode)" }
     }
 
-    Write-Host "`n✅ ScanSnap Home installed silently (EULA accepted, defaults kept)."
+    Write-Host "`nScanSnap Home installed silently (EULA accepted, defaults kept)."
+    $script:exitCode = 0
 }
 catch {
-    Write-Error "❌ $($_.Exception.Message)"
+    Write-Error $_.Exception.Message
+    $script:exitCode = 1
 }
 finally {
     if (-not $KeepFiles) { Remove-Item $WorkFolder -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Host "Install logs: $logRoot"
 }
+
+exit $script:exitCode

@@ -1,9 +1,9 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Remotely install/update Microsoft Edge via PsExec with CSV input and failure export.
-    PsExec is used intentionally — WinRM/PSRemoting is not available in this environment.
+    PsExec is used intentionally - WinRM/PSRemoting is not available in this environment.
 
 .PARAMETER DownloadURL
     Direct URL to the Edge Enterprise MSI.
@@ -38,7 +38,8 @@ param(
     [string] $InputCSV,
     [string] $FailedCSV     = (Join-Path $PSScriptRoot 'FailedComputers.csv'),
     [string] $LogFile       = (Join-Path $PSScriptRoot 'EdgeInstallLog.txt'),
-    [string] $PSToolsPath   = 'C:\PSTools'
+    [string] $PSToolsPath   = 'C:\PSTools',
+    [int]    $MaxCacheAgeHours = 24
 )
 
 Set-StrictMode -Version Latest
@@ -57,21 +58,43 @@ function Write-Log {
     Write-Host $line
 }
 
+function Get-VerifiedInstaller {
+    # Downloads the installer once and verifies it's validly signed by
+    # Microsoft before it's ever pushed to a single machine. Without this, a
+    # compromised CDN response or DNS hijack on $DownloadURL would get
+    # copied out to every computer in $InputCSV via PsExec as SYSTEM - this
+    # is the only thing standing between that and a fleet-wide compromise.
+    $localPath = Join-Path $PSToolsPath $InstallerName
+    $isStale = (Test-Path $localPath) -and
+               ((Get-Item $localPath).LastWriteTime -lt (Get-Date).AddHours(-$MaxCacheAgeHours))
+    if ($isStale) {
+        Write-Log "Cached installer is older than $MaxCacheAgeHours hour(s) - re-downloading rather than pushing a stale build to the whole fleet."
+        Remove-Item -Path $localPath -Force -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path $localPath)) {
+        Write-Log "Downloading installer from $DownloadURL ..."
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $DownloadURL -OutFile $localPath -UseBasicParsing -ErrorAction Stop
+    }
+
+    $sig = Get-AuthenticodeSignature -FilePath $localPath
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+        Remove-Item -Path $localPath -Force -ErrorAction SilentlyContinue
+        throw "Installer at $localPath failed Authenticode validation (status: $($sig.Status)) - refusing to deploy it to any machine."
+    }
+    Write-Log "Installer Authenticode signature verified (Microsoft Corporation): $localPath"
+    return $localPath
+}
+
 function Install-EdgeRemote {
-    param([string]$ComputerName)
+    param([string]$ComputerName, [string]$LocalInstallerPath)
 
     Write-Log "[$ComputerName] Starting Edge install..."
     try {
-        # Cache installer locally once
-        $localPath = Join-Path $PSToolsPath $InstallerName
-        if (-not (Test-Path $localPath)) {
-            Write-Log "[$ComputerName] Downloading installer..."
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $DownloadURL -OutFile $localPath -UseBasicParsing -ErrorAction Stop
-        }
+        $localPath = $LocalInstallerPath
 
         if (-not (Test-Connection -ComputerName $ComputerName -Count 2 -Quiet)) {
-            Write-Log "[$ComputerName] Unreachable — skipping."
+            Write-Log "[$ComputerName] Unreachable - skipping."
             $script:FailedComputers.Add($ComputerName)
             return
         }
@@ -83,7 +106,7 @@ function Install-EdgeRemote {
         Copy-Item -Path $localPath -Destination $uncInstaller -Force -ErrorAction Stop
 
         if (-not (Test-Path $uncInstaller)) {
-            Write-Log "[$ComputerName] Copy failed — skipping."
+            Write-Log "[$ComputerName] Copy failed - skipping."
             $script:FailedComputers.Add($ComputerName)
             return
         }
@@ -92,10 +115,10 @@ function Install-EdgeRemote {
         $rc = $LASTEXITCODE
 
         if ($rc -in @(0, 3010, 1641)) {
-            Write-Log "[$ComputerName] SUCCESS — Edge installed (exit $rc)."
+            Write-Log "[$ComputerName] SUCCESS - Edge installed (exit $rc)."
             if ($rc -ne 0) { Write-Log "[$ComputerName] NOTE: Reboot pending to complete update." }
         } else {
-            Write-Log "[$ComputerName] ERROR — msiexec exit code: $rc"
+            Write-Log "[$ComputerName] ERROR - msiexec exit code: $rc"
             $script:FailedComputers.Add($ComputerName)
         }
 
@@ -109,8 +132,9 @@ function Install-EdgeRemote {
 # --- Main ---
 Write-Log "=== Edge remote install started ==="
 $computers = Import-Csv -Path $InputCSV | Select-Object -ExpandProperty ComputerName
+$verifiedInstallerPath = Get-VerifiedInstaller
 
-foreach ($computer in $computers) { Install-EdgeRemote -ComputerName $computer }
+foreach ($computer in $computers) { Install-EdgeRemote -ComputerName $computer -LocalInstallerPath $verifiedInstallerPath }
 
 if ($script:FailedComputers.Count -gt 0) {
     $script:FailedComputers | ForEach-Object { [PSCustomObject]@{ ComputerName = $_ } } |
@@ -120,3 +144,4 @@ if ($script:FailedComputers.Count -gt 0) {
     Write-Log "All installations completed successfully."
 }
 Write-Log "=== Edge remote install complete ==="
+exit ($(if ($script:FailedComputers.Count -gt 0) { 1 } else { 0 }))

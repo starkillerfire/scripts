@@ -1,11 +1,11 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Enable WinVerifyTrust signature hardening (CVE-2013-3900) on local or remote computers.
 
 .DESCRIPTION
     Sets EnableCertPaddingCheck = 1 (DWORD) in both the 64-bit and WOW6432Node Wintrust
-    registry paths. Uses the .NET remote registry API (DCOM/RPC) for remote targets —
+    registry paths. Uses the .NET remote registry API (DCOM/RPC) for remote targets -
     no WinRM required.
 
 .PARAMETER ComputerName
@@ -99,3 +99,5 @@ Write-Host "Results saved to: $OutputCsv"
 
 $failed = @($results | Where-Object { $_.Status -eq 'Failed' })
 if ($failed.Count) { Write-Warning "$($failed.Count) machine(s) failed. Check $OutputCsv for details." }
+
+exit ($(if ($failed.Count -gt 0) { 1 } else { 0 }))

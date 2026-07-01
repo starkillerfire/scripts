@@ -7,5 +7,7 @@ REM ------------------------------------------------------------
     -NoLogo -NoProfile -ExecutionPolicy Bypass ^
     -File "%~dp0MasterInstaller.ps1" %*
 
+set "EXITCODE=%errorlevel%"
 REM Keep the window open so you can read any output
 pause
+exit /b %EXITCODE%

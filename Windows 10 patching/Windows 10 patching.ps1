@@ -1,4 +1,4 @@
-<# =======================================================================
+﻿<# =======================================================================
  Invoke-FleetPatchSweep.ps1
  -------------------------------------------------------------------------
  Enterprise patch sweep with MU-flip + WSUS rollback, retry logic,
@@ -177,7 +177,16 @@ if ((Get-WURebootStatus).RebootNeeded) {
     shutdown /r /t 30 /c "PatchSweep updates"
 }
 
-# ---- rollback to WSUS ----
+# Roll back the MU flip set earlier in this payload (Set-PSWUSettings
+# -MicrosoftUpdate $true). The whole point of flipping to Microsoft Update
+# was to opportunistically pick up updates/drivers WSUS hasn't approved yet
+# for this one scan-and-install pass; once that's done, control needs to
+# go back to WSUS/GPO so it keeps governing the machine between sweeps
+# instead of fighting with whatever Group Policy expects. This import runs
+# unconditionally, on every sweep, regardless of whether the install above
+# succeeded - it is the "WSUS rollback" half of the MU-flip+WSUS-rollback
+# design described at the top of this script, not a failure-only recovery
+# step.
 reg.exe export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate" $bkAfter /y | Out-Null
 reg.exe import $bkBefore | Out-Null
 gpupdate /target:computer /force /wait:0 | Out-Null
@@ -218,6 +227,15 @@ if (Test-Path $CentralShare) {
     Copy-Item $localLog  -Destination (Join-Path $CentralShare "$env:COMPUTERNAME.summary.log")    -Force
 }
 Stop-Transcript | Out-Null
+
+# Explicit success marker. Invoke-Command is called synchronously (no
+# -AsJob) further down in this script, so what it returns here is plain
+# pipeline output, not a Job object - it has no .State property to check.
+# Returning this object is what lets the caller in the main loop tell
+# completed nodes apart from ones that errored or never returned, by
+# matching on the PSComputerName property PowerShell attaches automatically
+# to remote output.
+[pscustomobject]@{ ComputerName = $env:COMPUTERNAME; Status = 'Completed' }
 } # --- end payload
 
 # ========= MAIN loop through rings/chunks ====================================
@@ -227,19 +245,34 @@ foreach ($ring in $TargetChunks) {
         Write-Host "Ring size $($ring.Count) - Attempt $try on $($remaining.Count) node(s)…"
 
         $cim = New-CimSession -ComputerName $remaining -Credential $AdminCred -ErrorAction SilentlyContinue
+        $cimFailed = $remaining | Where-Object { $_ -notin ($cim | Select-Object -ExpandProperty ComputerName) }
+        foreach ($c in $cimFailed) {
+            Write-Warning "Ring attempt $try : could not establish a CIM session to $c"
+        }
 
         $job = Invoke-Command -CimSession $cim -ScriptBlock $RemotePayload -ArgumentList `
                $CentralLogShare,$PSWUVersion,$NoDrivers,$NoFeatureUpgrades,`
-               $OffLineCatchupHours,$OffLineCatchupSpan
+               $OffLineCatchupHours,$OffLineCatchupSpan -ErrorAction SilentlyContinue
+
+        # $job holds the [pscustomobject] each node returns at the end of
+        # $RemotePayload. Nodes that errored partway through, or never made
+        # it that far, simply won't have an entry here - there's no
+        # separate error bucket to check.
+        $completedComputers = $job | Select-Object -ExpandProperty PSComputerName -Unique
 
         foreach ($s in $cim) {
-            $state = if ($job | Where-Object { $_.PSComputerName -eq $s.ComputerName -and $_.State -eq 'Completed' }) {
-                         'Completed'
-                     } else { 'Failed' }
+            $state = if ($s.ComputerName -in $completedComputers) { 'Completed' } else { 'Failed' }
 
             $JobsSummary.Add([pscustomobject]@{
                 ComputerName = $s.ComputerName
                 State        = $state
+                Attempt      = $try
+            })
+        }
+        foreach ($c in $cimFailed) {
+            $JobsSummary.Add([pscustomobject]@{
+                ComputerName = $c
+                State        = 'Failed'
                 Attempt      = $try
             })
         }

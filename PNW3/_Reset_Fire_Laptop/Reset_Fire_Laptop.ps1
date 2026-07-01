@@ -1,4 +1,4 @@
-# Cobbler: Brian Lamb
+﻿# Cobbler: Brian Lamb
 # brian_lamb@firenet.gov
 # Date: 29-Oct-2020 Version 1.0
 # Date: 16-Jul-2021 Version 1.1
@@ -44,7 +44,18 @@
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [switch]$SkipReboot
+    [switch]$SkipReboot,
+    # Clearing the Security log on a domain-joined machine can trigger SIEM
+    # alerts or conflict with GPO audit-retention policy - pass this to skip
+    # it specifically while still clearing everything else, rather than
+    # having to coordinate with the security team every single time.
+    [switch]$PreserveSecurityLog,
+    # PST files found under Documents/Downloads/Desktop are deleted outright
+    # by default. Pass this to copy them to $PstBackupPath first instead of
+    # just deleting - a user may have intentionally archived a PST outside
+    # the default Outlook data file location.
+    [switch]$BackupPst,
+    [string]$PstBackupPath = "$env:SystemDrive\PstBackup"
 )
 
 #region Admin check
@@ -54,7 +65,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 #endregion
 
-#region Transcript — skipped in WhatIf mode (nothing to log, log dir may not exist)
+#region Transcript - skipped in WhatIf mode (nothing to log, log dir may not exist)
 if (-not $WhatIfPreference) {
     $LogDir = "$env:SystemDrive\Logs"
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
@@ -64,11 +75,11 @@ if (-not $WhatIfPreference) {
 }
 #endregion
 
-# Base path for all user profiles — avoids hardcoding C:\Users throughout.
+# Base path for all user profiles - avoids hardcoding C:\Users throughout.
 # $env:SystemDrive is set by Windows (e.g. C:) and is correct even on non-C installs.
 $UsersBase = "$env:SystemDrive\Users"
 
-# Shared regex for Chromium-based browser data — used by both Clear-Chrome and Clear-Edge.
+# Shared regex for Chromium-based browser data - used by both Clear-Chrome and Clear-Edge.
 # Includes extension local storage so cached auth tokens are also cleared.
 $script:BrowserDataRegex = 'Archived History|Cache|Cookies|History|IndexedDB|Local Extension Settings|Login Data|Top Sites|Visited Links|Web Data'
 
@@ -86,7 +97,7 @@ function Stop-ProcessAndWait {
     }
 }
 
-# Collects names of any steps that threw — read by the summary block.
+# Collects names of any steps that threw - read by the summary block.
 $script:stepErrors = [System.Collections.Generic.List[string]]::new()
 
 # Run a named cleanup step with a timestamp header and elapsed time footer.
@@ -125,7 +136,7 @@ function Invoke-ForEachUserHive {
             if (-not $alreadyLoaded -and (Test-Path $ntuser)) {
                 reg load "HKU\$sid" $ntuser 2>$null | Out-Null
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Warning "  Could not load hive for $(Split-Path $path -Leaf) — skipping"
+                    Write-Warning "  Could not load hive for $(Split-Path $path -Leaf) - skipping"
                     return
                 }
                 $loaded = $true
@@ -144,7 +155,7 @@ function Invoke-ForEachUserHive {
 Function Clear-Chrome {
     Stop-ProcessAndWait -Name 'chrome'
 
-    # Single traversal — covers all users and all Chrome profiles (Default, Profile 1, …).
+    # Single traversal - covers all users and all Chrome profiles (Default, Profile 1, …).
     # BrowserDataRegex includes extension local storage for cached auth tokens.
     Get-ChildItem "$UsersBase\*\AppData\Local\Google\Chrome\User Data" -Recurse -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match $script:BrowserDataRegex } |
@@ -206,13 +217,13 @@ Function Clear-FireFox {
 Function Clear-Edge {
     Stop-ProcessAndWait -Name 'msedge'
 
-    # Single traversal — covers all users and all Edge profiles.
+    # Single traversal - covers all users and all Edge profiles.
     # BrowserDataRegex includes Archived History and extension local storage.
     Get-ChildItem "$UsersBase\*\AppData\Local\Microsoft\Edge\User Data" -Recurse -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match $script:BrowserDataRegex } |
         Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
-    # Legacy EdgeHTML (UWP) — kept for any machines that still have it
+    # Legacy EdgeHTML (UWP) - kept for any machines that still have it
     Remove-Item "$env:LOCALAPPDATA\Packages\Microsoft.MicrosoftEdge_8wekyb3d8bbwe\AC\#!*" -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host -ForegroundColor Yellow "Edge Cache Removal - COMPLETE`r`n"
@@ -275,11 +286,11 @@ Function Clear-WER {
 Function Clear-WindowsTemp {
     Write-Host "Clearing Windows Temp and SoftwareDistribution Download cache..."
 
-    # Capture original state — only restart services that were running before we stopped them
+    # Capture original state - only restart services that were running before we stopped them
     $wuWasRunning   = (Get-Service wuauserv -ErrorAction SilentlyContinue).Status -eq 'Running'
     $bitsWasRunning = (Get-Service bits     -ErrorAction SilentlyContinue).Status -eq 'Running'
 
-    # Stop Windows Update and BITS — SoftwareDistribution files may be locked while
+    # Stop Windows Update and BITS - SoftwareDistribution files may be locked while
     # an update is downloading or staging
     Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
     Stop-Service -Name bits     -Force -ErrorAction SilentlyContinue
@@ -298,7 +309,7 @@ Function Clear-NetworkCredentials {
 
     # Note: cmdkey only operates on the current user's DPAPI-protected credential vault.
     # Other users' stored credentials cannot be enumerated or deleted without their
-    # password or a domain recovery key — this is a Windows platform limitation.
+    # password or a domain recovery key - this is a Windows platform limitation.
     # Split on 'Target:' to handle output format variations across Windows versions.
     $targets = (cmdkey /list) -match 'Target:' |
         ForEach-Object { ($_ -split 'Target:\s*')[1].Trim() }
@@ -370,7 +381,7 @@ Function Clear-WindowsHistory {
         Remove-Item "$base\TypedPaths"     -Recurse -Force -ErrorAction SilentlyContinue
         # Start menu / taskbar search history
         Remove-Item "$base\WordWheelQuery" -Recurse -Force -ErrorAction SilentlyContinue
-        # Recently opened files list (by file type — Word docs, PDFs, etc.)
+        # Recently opened files list (by file type - Word docs, PDFs, etc.)
         Remove-Item "$base\RecentDocs"     -Recurse -Force -ErrorAction SilentlyContinue
         Write-Host "  Explorer history cleared for: $(Split-Path $ProfilePath -Leaf)"
     }
@@ -378,7 +389,7 @@ Function Clear-WindowsHistory {
     # Prefetch reveals program execution history; Windows rebuilds it automatically
     Remove-Item "$env:SystemRoot\Prefetch\*" -Recurse -Force -ErrorAction SilentlyContinue
 
-    # Thumbnail cache reveals image browsing history — per-user, not covered by CleanMgr
+    # Thumbnail cache reveals image browsing history - per-user, not covered by CleanMgr
     Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Windows\Explorer\thumbcache_*.db" `
         -Force -ErrorAction SilentlyContinue
 
@@ -393,12 +404,18 @@ Function Clear-EventLogs {
     Write-Host "Clearing Windows Event Logs (all logs with content)..."
 
     # Note: clearing the Security log on domain-joined machines may trigger SIEM alerts
-    # or conflict with GPO audit-retention policies — coordinate with the security team.
+    # or conflict with GPO audit-retention policies - coordinate with the security team,
+    # or pass -PreserveSecurityLog to skip just that log.
     $cleared = 0
     $skipped = 0
     Get-WinEvent -ListLog * -ErrorAction SilentlyContinue |
         Where-Object { $_.RecordCount -gt 0 } |
         ForEach-Object {
+            if ($PreserveSecurityLog -and $_.LogName -eq 'Security') {
+                Write-Host "  Preserved: '$($_.LogName)' (per -PreserveSecurityLog)" -ForegroundColor DarkYellow
+                $skipped++
+                return
+            }
             if ($WhatIfPreference) {
                 Write-Host "  What if: would clear log '$($_.LogName)'" -ForegroundColor DarkYellow
                 $cleared++
@@ -416,7 +433,7 @@ Function Clear-EventLogs {
 }
 
 Function Remove-TeamsProfile {
-    # Classic Teams (v1) — stop process, then clear data for ALL users on the machine
+    # Classic Teams (v1) - stop process, then clear data for ALL users on the machine
     Stop-ProcessAndWait -Name 'teams'
 
     Get-Item "$UsersBase\*\AppData\Roaming\Microsoft\Teams" -ErrorAction SilentlyContinue |
@@ -430,7 +447,7 @@ Function Remove-TeamsProfile {
     Get-Item "$UsersBase\*\AppData\Local\Packages\Microsoft.AAD.BrokerPlugin_*" -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-    # New Teams (v2) — process: ms-teams, data: LocalAppData\Packages\MSTeams_* (all users)
+    # New Teams (v2) - process: ms-teams, data: LocalAppData\Packages\MSTeams_* (all users)
     Stop-ProcessAndWait -Name 'ms-teams'
 
     Get-Item "$UsersBase\*\AppData\Local\Packages\MSTeams_*" -ErrorAction SilentlyContinue |
@@ -439,7 +456,7 @@ Function Remove-TeamsProfile {
             Write-Host "New Teams (v2) removed for: $($_.FullName.Split('\')[2])" -ForegroundColor Cyan
         }
 
-    # Meeting recordings saved locally — can be large and contain sensitive operational content
+    # Meeting recordings saved locally - can be large and contain sensitive operational content
     Remove-Item "$UsersBase\*\Videos\Microsoft Teams\*" -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host -ForegroundColor Yellow "Teams Profile Removal - COMPLETE`r`n"
@@ -448,7 +465,7 @@ Function Remove-TeamsProfile {
 Function Remove-OutlookProfile {
     Stop-ProcessAndWait -Name 'outlook'
 
-    # Registry profile key — clear for every user hive, not just the running user
+    # Registry profile key - clear for every user hive, not just the running user
     Invoke-ForEachUserHive {
         param([string]$Sid, [string]$ProfilePath)
         Remove-Item "Registry::HKU\$Sid\Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles" `
@@ -456,15 +473,33 @@ Function Remove-OutlookProfile {
         Write-Host "  Outlook profile registry cleared for: $(Split-Path $ProfilePath -Leaf)"
     }
 
-    # OST files can be gigabytes of cached email/calendar/contacts — remove across all users
+    # OST files can be gigabytes of cached email/calendar/contacts - remove across all users
     Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.ost"     -Force -ErrorAction SilentlyContinue
     Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.ost.old" -Force -ErrorAction SilentlyContinue
     Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.nk2"     -Force -ErrorAction SilentlyContinue
 
-    # PST files — search Documents, Downloads, and Desktop across all users
-    Get-ChildItem "$UsersBase\*\Documents", "$UsersBase\*\Downloads", "$UsersBase\*\Desktop" `
-        -Filter '*.pst' -Recurse -Force -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+    # PST files - search Documents, Downloads, and Desktop across all users.
+    # These can be intentionally-archived mailboxes a user moved out of the
+    # default Outlook data file location, not just cache - so back them up
+    # first when -BackupPst is passed instead of deleting outright.
+    $pstFiles = Get-ChildItem "$UsersBase\*\Documents", "$UsersBase\*\Downloads", "$UsersBase\*\Desktop" `
+        -Filter '*.pst' -Recurse -Force -ErrorAction SilentlyContinue
+
+    if ($BackupPst -and $pstFiles) {
+        if (-not (Test-Path $PstBackupPath)) { New-Item -Path $PstBackupPath -ItemType Directory -Force | Out-Null }
+        foreach ($pst in $pstFiles) {
+            $userName = ($pst.FullName -split '\\')[$UsersBase.Split('\\').Count]
+            $destName = "$userName-$($pst.Name)"
+            try {
+                Copy-Item -Path $pst.FullName -Destination (Join-Path $PstBackupPath $destName) -Force -ErrorAction Stop
+                Write-Host "  Backed up: $($pst.FullName) -> $(Join-Path $PstBackupPath $destName)"
+            } catch {
+                Write-Host "  WARNING: Could not back up $($pst.FullName): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    $pstFiles | Remove-Item -Force -ErrorAction SilentlyContinue
 
     Write-Host -ForegroundColor Yellow "Outlook Profile Removal - COMPLETE`r`n"
 }
@@ -497,12 +532,18 @@ Function Clear-PinnedItems {
             $found = $false
             foreach ($item in $shell.Namespace("shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}").Items()) {
                 if (-not $item.IsFolder) { continue }
-                $verb = $item.Verbs() | Where-Object Name -match 'Remove from Quick access'
-                if ($verb) {
-                    $verb.DoIt()
+                # 'unpinfromhome' is the shell's canonical, locale-independent
+                # verb for this action - matching the display text "Remove
+                # from Quick access" only works on English Windows and
+                # silently no-ops (nothing ever gets unpinned, no error) on
+                # any other display language.
+                try {
+                    $item.InvokeVerb('unpinfromhome')
                     Start-Sleep -Milliseconds 300
                     $found = $true
                     break
+                } catch {
+                    continue
                 }
             }
         }
@@ -568,7 +609,7 @@ Function Clear-Disk {
 Function Invoke-DISMCleanup {
     Write-Host 'Running DISM component store cleanup (this may take several minutes)...'
     # To also remove all superseded update rollback data and reclaim more space, add /ResetBase
-    # (one-way operation — disables uninstalling already-installed updates afterwards):
+    # (one-way operation - disables uninstalling already-installed updates afterwards):
     #   Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase
     if ($WhatIfPreference) {
         Write-Host '  What if: would run Dism.exe /online /Cleanup-Image /StartComponentCleanup' -ForegroundColor DarkYellow
@@ -577,7 +618,7 @@ Function Invoke-DISMCleanup {
     }
     Dism.exe /online /Cleanup-Image /StartComponentCleanup
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "DISM exited with code $LASTEXITCODE — component cleanup may be incomplete."
+        Write-Warning "DISM exited with code $LASTEXITCODE - component cleanup may be incomplete."
     }
     else {
         Write-Host -ForegroundColor Yellow "DISM Component Cleanup - COMPLETE`r`n"
@@ -589,10 +630,10 @@ Function Invoke-DISMCleanup {
 Write-Host "Series of commands to clear browser profile information, Teams and OneDrive"
 Write-Host "Pulled from various web sources. This is a " -NoNewline
 Write-Host "DESTRUCTIVE" -ForegroundColor Red -NoNewline
-Write-Host " process — data will not be recoverable. Proceed accordingly."
+Write-Host " process - data will not be recoverable. Proceed accordingly."
 
 if ($WhatIfPreference) {
-    Write-Host "`nRunning in -WhatIf mode — no changes will be made.`n" -ForegroundColor DarkYellow
+    Write-Host "`nRunning in -WhatIf mode - no changes will be made.`n" -ForegroundColor DarkYellow
 }
 else {
     Read-Host "`nEnter Ctrl-C to cancel, or press Enter to continue"
@@ -640,7 +681,7 @@ try {
     Write-Host "$('=' * 60)`n" -ForegroundColor Cyan
 
     if ($WhatIfPreference) {
-        Write-Host "WhatIf run complete — no changes were made." -ForegroundColor DarkYellow
+        Write-Host "WhatIf run complete - no changes were made." -ForegroundColor DarkYellow
     }
     elseif ($SkipReboot) {
         Write-Host "Reboot suppressed (-SkipReboot). Reboot manually when ready." -ForegroundColor Yellow

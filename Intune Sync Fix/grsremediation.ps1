@@ -1,4 +1,4 @@
-#### BEGIN FUNCTIONS ####
+﻿#### BEGIN FUNCTIONS ####
 
 <#
     .SYNOPSIS
@@ -13,7 +13,7 @@
 #>
 function Get-FailedWin32AppStates {
     $win32AppsKeyPath = 'HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps'
-    $appSubKeys = Get-ChildItem -Path $win32AppsKeyPath -Recurse
+    $appSubKeys = Get-ChildItem -Path $win32AppsKeyPath -Recurse -ErrorAction SilentlyContinue
 
     $failedStates = @()
     foreach ($subKey in $appSubKeys) {
@@ -23,7 +23,7 @@ function Get-FailedWin32AppStates {
                 $errorCode = $matches[1]
                 if ($errorCode -ne "null") {
                     $errorCode = [int]$errorCode
-                    if (($errorCode -ne 0) -and ($errorCode -ne 3010) -and ($errorCode -ne $null)) {
+                    if (($errorCode -ne 0) -and ($errorCode -ne 3010)) {
                         $failedStates += [PSCustomObject]@{
                             SubKeyPath = $subKey.PSPath
                             ErrorCode  = $errorCode
@@ -280,7 +280,7 @@ try {
             # Get the error description
             $errorDescription = Get-ErrorDescription -errorCode $state.ErrorCode
 
-            Write-Host "AppID: $appId failed for user $userName — error $($state.ErrorCode): $errorDescription"
+            Write-Host "AppID: $appId failed for user $userName - error $($state.ErrorCode): $errorDescription"
 
             # Get the LastHashValue and remove registry keys to force re-evaluation
             $lastHashValue = Get-LastHashValue -userObjectId $userObjectId -appId $appId

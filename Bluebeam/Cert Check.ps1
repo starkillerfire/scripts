@@ -1,4 +1,4 @@
-<# 
+﻿<# 
 .SYNOPSIS
   Test TSA chain(s) and collect CAPI2 revocation logs into one ZIP (PowerShell 5.1).
 
@@ -12,16 +12,22 @@
   - Produces a ZIP on the Desktop with all results.
 
 .PARAMETERS
-  -MinutesToCapture  Minutes of CAPI2 events to export (default 20)
-  -MaxEvents         Maximum CAPI2 events to export (default 200)
-  -NoPause           Skip the "reproduce now" pause (non-interactive)
+  -MinutesToCapture     Minutes of CAPI2 events to export (default 20)
+  -MaxEvents            Maximum CAPI2 events to export (default 200)
+  -NoPause              Skip the "reproduce now" pause (non-interactive)
+  -DisableLoggingOnExit Turn CAPI2 Operational logging back off before the
+                        script exits, instead of leaving it on for further
+                        manual testing (the default). Use this for
+                        unattended/scripted runs where nobody will remember
+                        to run Disable CAI2.ps1 afterward.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
   [Parameter()][ValidateRange(1,240)][int]$MinutesToCapture = 20,
   [Parameter()][ValidateRange(10,2000)][int]$MaxEvents = 200,
-  [Parameter()][switch]$NoPause
+  [Parameter()][switch]$NoPause,
+  [Parameter()][switch]$DisableLoggingOnExit
 )
 
 # --- Require Administrator ---------------------------------------------------
@@ -104,7 +110,7 @@ foreach ($store in $stores) {
       }
     }
   } catch {
-    Write-Warn "Could not read $store: $($_.Exception.Message)"
+    Write-Warn "Could not read ${store}: $($_.Exception.Message)"
   }
 }
 
@@ -196,7 +202,17 @@ try {
   Write-Err "Failed to create ZIP: $($_.Exception.Message)"
 }
 
-Write-Host "`nCAPI2 logging is STILL ENABLED."
-Write-Host "When you're done testing, disable it with this command:" -ForegroundColor Yellow
-Write-Host "  wevtutil sl `"Microsoft-Windows-CAPI2/Operational`" /e:false" -ForegroundColor Yellow
+if ($DisableLoggingOnExit) {
+  try {
+    wevtutil sl "$capiChannel" /e:false | Out-Null
+    Write-Ok "CAPI2 Operational logging has been DISABLED (per -DisableLoggingOnExit)."
+  } catch {
+    Write-Err "Failed to disable CAPI2 logging: $($_.Exception.Message)"
+    Write-Host "  Disable it manually with: wevtutil sl `"$capiChannel`" /e:false" -ForegroundColor Yellow
+  }
+} else {
+  Write-Host "`nCAPI2 logging is STILL ENABLED."
+  Write-Host "When you're done testing, disable it with this command (or run Disable CAI2.ps1):" -ForegroundColor Yellow
+  Write-Host "  wevtutil sl `"Microsoft-Windows-CAPI2/Operational`" /e:false" -ForegroundColor Yellow
+}
 Write-Host "`nDone. Share the ZIP with your PKI/Bluebeam support team."

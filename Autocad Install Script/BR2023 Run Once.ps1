@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   BR Civil 3D 2023 deployment toolkit - fully automated (no external config).
 
@@ -196,8 +196,22 @@ function Invoke-BrConfig {
 
 function Remove-BrPayload {
     param([string]$LocalDst,[string]$LogRoot)
-    Remove-Item $LocalDst -Recurse -Force -ea 0
-    Remove-Item "$LogRoot\$Env:COMPUTERNAME*" -Force -ea 0
+
+    # -ErrorAction SilentlyContinue used to mean cleanup failures (locked
+    # file, permissions, etc.) vanished with no trace at all. -ErrorVariable
+    # still captures them so real failures get logged, while "nothing there
+    # to remove" (ObjectNotFound) stays quiet since that's the normal case.
+    Remove-Item $LocalDst -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable dstErr
+    $realDstErr = $dstErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
+    if ($realDstErr) {
+        LogMsg "WARNING: Failed to fully clean up '$LocalDst': $(($realDstErr.Exception.Message | Select-Object -Unique) -join '; ')"
+    }
+
+    Remove-Item "$LogRoot\$Env:COMPUTERNAME*" -Force -ErrorAction SilentlyContinue -ErrorVariable logErr
+    $realLogErr = $logErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
+    if ($realLogErr) {
+        LogMsg "WARNING: Failed to remove old log files under '$LogRoot': $(($realLogErr.Exception.Message | Select-Object -Unique) -join '; ')"
+    }
 }
 
 function Install-BrCleanupTask {

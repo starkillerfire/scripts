@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
@@ -22,7 +22,14 @@ Set-StrictMode -Version Latest
 
 Write-Host "Scanning for RSAT features..." -ForegroundColor Cyan
 
-$missing = Get-WindowsCapability -Online |
+try {
+    $capabilities = Get-WindowsCapability -Online -ErrorAction Stop
+} catch {
+    Write-Error "Could not query Windows capabilities (DISM/WMI may be unavailable): $($_.Exception.Message)"
+    exit 1
+}
+
+$missing = $capabilities |
     Where-Object {
         $_.Name -like 'Rsat.*' -and
         $_.State -notin @('Installed', 'InstallPending') -and
@@ -46,11 +53,11 @@ foreach ($cap in $missing) {
         Write-Host "  OK: $($cap.Name)" -ForegroundColor Green
         $succeeded++
     } catch {
-        Write-Warning "  FAILED: $($cap.Name) — $($_.Exception.Message)"
+        Write-Warning "  FAILED: $($cap.Name) - $($_.Exception.Message)"
         $failed++
     }
 }
 
 Write-Host ""
-Write-Host "RSAT install complete — $succeeded succeeded, $failed failed." -ForegroundColor Cyan
+Write-Host "RSAT install complete - $succeeded succeeded, $failed failed." -ForegroundColor Cyan
 exit $(if ($failed -gt 0) { 1 } else { 0 })

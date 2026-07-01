@@ -1,9 +1,9 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Remotely install/update Google Chrome via PsExec with CSV input and failure export.
-    PsExec is used intentionally — WinRM/PSRemoting is not available in this environment.
+    PsExec is used intentionally - WinRM/PSRemoting is not available in this environment.
 
 .PARAMETER DownloadURL
     Direct URL to the Chrome Enterprise MSI.
@@ -38,7 +38,8 @@ param(
     [string] $InputCSV,
     [string] $FailedCSV     = (Join-Path $PSScriptRoot 'FailedComputers.csv'),
     [string] $LogFile       = (Join-Path $PSScriptRoot 'ChromeInstallLog.txt'),
-    [string] $PSToolsPath   = 'C:\PSTools'
+    [string] $PSToolsPath   = 'C:\PSTools',
+    [int]    $MaxCacheAgeHours = 24
 )
 
 Set-StrictMode -Version Latest
@@ -78,23 +79,45 @@ function Get-ChromeVersion {
     }
 }
 
+function Get-VerifiedInstaller {
+    # Downloads the installer once and verifies it's validly signed by
+    # Google before it's ever pushed to a single machine. Without this, a
+    # compromised CDN response or DNS hijack on $DownloadURL would get
+    # copied out to every computer in $InputCSV via PsExec as SYSTEM - this
+    # is the only thing standing between that and a fleet-wide compromise.
+    $localPath = Join-Path $PSToolsPath $InstallerName
+    $isStale = (Test-Path $localPath) -and
+               ((Get-Item $localPath).LastWriteTime -lt (Get-Date).AddHours(-$MaxCacheAgeHours))
+    if ($isStale) {
+        Write-Log "Cached installer is older than $MaxCacheAgeHours hour(s) - re-downloading rather than pushing a stale build to the whole fleet."
+        Remove-Item -Path $localPath -Force -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path $localPath)) {
+        Write-Log "Downloading installer from $DownloadURL ..."
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $DownloadURL -OutFile $localPath -UseBasicParsing -ErrorAction Stop
+    }
+
+    $sig = Get-AuthenticodeSignature -FilePath $localPath
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Google LLC') {
+        Remove-Item -Path $localPath -Force -ErrorAction SilentlyContinue
+        throw "Installer at $localPath failed Authenticode validation (status: $($sig.Status)) - refusing to deploy it to any machine."
+    }
+    Write-Log "Installer Authenticode signature verified (Google LLC): $localPath"
+    return $localPath
+}
+
 function Install-ChromeRemote {
-    param([string]$ComputerName)
+    param([string]$ComputerName, [string]$LocalInstallerPath)
 
     $currentVersion = Get-ChromeVersion -ComputerName $ComputerName
     Write-Log "[$ComputerName] Chrome before: $(if ($currentVersion) { $currentVersion } else { 'not installed' })"
 
     try {
-        # Cache installer locally once
-        $localPath = Join-Path $PSToolsPath $InstallerName
-        if (-not (Test-Path $localPath)) {
-            Write-Log "[$ComputerName] Downloading installer..."
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $DownloadURL -OutFile $localPath -UseBasicParsing -ErrorAction Stop
-        }
+        $localPath = $LocalInstallerPath
 
         if (-not (Test-Connection -ComputerName $ComputerName -Count 2 -Quiet)) {
-            Write-Log "[$ComputerName] Unreachable — skipping."
+            Write-Log "[$ComputerName] Unreachable - skipping."
             $script:FailedComputers.Add($ComputerName)
             return
         }
@@ -106,7 +129,7 @@ function Install-ChromeRemote {
         Copy-Item -Path $localPath -Destination $uncInstaller -Force -ErrorAction Stop
 
         if (-not (Test-Path $uncInstaller)) {
-            Write-Log "[$ComputerName] Copy failed — skipping."
+            Write-Log "[$ComputerName] Copy failed - skipping."
             $script:FailedComputers.Add($ComputerName)
             return
         }
@@ -118,14 +141,14 @@ function Install-ChromeRemote {
             Start-Sleep -Seconds 15
             $newVersion = Get-ChromeVersion -ComputerName $ComputerName
             if ($newVersion -and $newVersion -ne $currentVersion) {
-                Write-Log "[$ComputerName] SUCCESS — Chrome updated to $newVersion (exit $rc)."
+                Write-Log "[$ComputerName] SUCCESS - Chrome updated to $newVersion (exit $rc)."
             } else {
-                Write-Log "[$ComputerName] WARNING — version unchanged after install (exit $rc, was: $currentVersion)."
+                Write-Log "[$ComputerName] WARNING - version unchanged after install (exit $rc, was: $currentVersion)."
                 $script:FailedComputers.Add($ComputerName)
             }
             if ($rc -ne 0) { Write-Log "[$ComputerName] NOTE: Reboot pending to complete update." }
         } else {
-            Write-Log "[$ComputerName] ERROR — msiexec exit code: $rc"
+            Write-Log "[$ComputerName] ERROR - msiexec exit code: $rc"
             $script:FailedComputers.Add($ComputerName)
         }
 
@@ -139,8 +162,9 @@ function Install-ChromeRemote {
 # --- Main ---
 Write-Log "=== Chrome remote install started ==="
 $computers = Import-Csv -Path $InputCSV | Select-Object -ExpandProperty ComputerName
+$verifiedInstallerPath = Get-VerifiedInstaller
 
-foreach ($computer in $computers) { Install-ChromeRemote -ComputerName $computer }
+foreach ($computer in $computers) { Install-ChromeRemote -ComputerName $computer -LocalInstallerPath $verifiedInstallerPath }
 
 if ($script:FailedComputers.Count -gt 0) {
     $script:FailedComputers | ForEach-Object { [PSCustomObject]@{ ComputerName = $_ } } |
@@ -150,3 +174,4 @@ if ($script:FailedComputers.Count -gt 0) {
     Write-Log "All installations completed successfully."
 }
 Write-Log "=== Chrome remote install complete ==="
+exit ($(if ($script:FailedComputers.Count -gt 0) { 1 } else { 0 }))

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Registers a Windows device with Microsoft Intune Autopilot
 
@@ -87,18 +87,32 @@ BEGIN {
             Sort-Object -Property RouteMetric |
             Select-Object -First 1
 
-        if ($defaultRoute) {
-            Set-DnsClientServerAddress -InterfaceIndex $defaultRoute.InterfaceIndex -ServerAddresses $publicDnsServers
-            Write-Verbose "Public DNS resolvers configured on interface index $($defaultRoute.InterfaceIndex)."
+        $targetInterfaceIndexes = if ($defaultRoute) {
+            @($defaultRoute.InterfaceIndex)
+        } else {
+            Get-NetAdapter |
+                Where-Object { $_.Status -eq "Up" -and $_.InterfaceType -ne 24 -and $_.InterfaceType -ne 131 } |
+                Select-Object -ExpandProperty InterfaceIndex
         }
-        else {
-            $activeAdapters = Get-NetAdapter |
-                Where-Object { $_.Status -eq "Up" -and $_.InterfaceType -ne 24 -and $_.InterfaceType -ne 131 }
-            foreach ($adapter in $activeAdapters) {
-                Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $publicDnsServers
-            }
-            Write-Verbose "Public DNS resolvers configured on all active adapters."
+
+        # Record the pre-existing DNS config (almost always DHCP-assigned at
+        # OOBE) before overriding it with public resolvers. This change has
+        # no automatic restore step - it's needed through the Windows Update
+        # phase that runs later in this same flow - so the backup file is
+        # here purely so a technician can put the original servers back by
+        # hand if this device ends up on a network where they actually
+        # mattered (e.g. an internal-only resolver).
+        $dnsBackupPath = "C:\Temp\Autopilot-DNS-Backup-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+        $dnsBackup = foreach ($ifIndex in $targetInterfaceIndexes) {
+            Get-DnsClientServerAddress -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue
         }
+        $dnsBackup | Format-Table -AutoSize | Out-File -FilePath $dnsBackupPath -Force -ErrorAction SilentlyContinue
+        Write-Verbose "Pre-existing DNS configuration backed up to $dnsBackupPath"
+
+        foreach ($ifIndex in $targetInterfaceIndexes) {
+            Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $publicDnsServers
+        }
+        Write-Verbose "Public DNS resolvers configured on interface index(es): $($targetInterfaceIndexes -join ', ')."
     }
     catch {
         Write-Host "Warning: Could not configure DNS resolvers: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -113,22 +127,6 @@ BEGIN {
         return
     }
     Write-Verbose "Microsoft Graph endpoint reachable."
-
-    if ($PSVersionTable.PSVersion.Major -le 5) {
-        if (-not ([System.Management.Automation.PSTypeName]'TrustAllCertsPolicy').Type) {
-            Add-Type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCertsPolicy : ICertificatePolicy {
-public bool CheckValidationResult(
-ServicePoint srvPoint, X509Certificate certificate,
-WebRequest request, int certificateProblem) {
-return true;
-}
-}
-"@
-        }
-    }
 
 #region installDependencies
     $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
@@ -164,30 +162,15 @@ return true;
 
         }
         catch {
-            Write-Verbose "Failed to install dependencies: $($_.Exception.Message)"
-            Write-Verbose "Trying with certificate bypass settings..."
-
-            try {
-                if ($PSVersionTable.PSVersion.Major -le 5) {
-                    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-                }
-
-                if (-not (Get-Command Get-WindowsAutopilotInfo -ErrorAction SilentlyContinue)) {
-                    Write-Verbose "Installing Get-WindowsAutopilotInfo script with certificate bypass..."
-                    Install-Script -Name Get-WindowsAutopilotInfo -Force -ErrorAction Stop
-                    Write-Verbose "Get-WindowsAutopilotInfo script installed successfully."
-                }
-
-                if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-                    Write-Verbose "Installing PSWindowsUpdate module with certificate bypass..."
-                    Install-Module -Name PSWindowsUpdate -Force -AllowClobber -Confirm:$false -ErrorAction Stop
-                    Write-Verbose "PSWindowsUpdate module installed successfully."
-                }
-
-            }
-            catch {
-                Write-Host "Failed to install dependencies even with certificate bypass: $($_.Exception.Message)" -ForegroundColor Red
-            }
+            # Deliberately not falling back to a certificate-validation
+            # bypass here. An earlier version of this script retried with
+            # [System.Net.ServicePointManager]::CertificatePolicy set to
+            # trust-all-certs whenever the initial install attempt hit a TLS
+            # error - that papers over a real cert-store or PSGallery issue
+            # and leaves this OOBE flow open to a MITM'd module/script
+            # download. Whatever's causing the failure needs to be fixed on
+            # the machine/network, not routed around.
+            Write-Host "Failed to install dependencies: $($_.Exception.Message)" -ForegroundColor Red
         }
     }
     else {
@@ -208,29 +191,9 @@ return true;
             }
         }
         catch {
-            Write-Verbose "Trying with certificate bypass..." 
-
-            try {
-                if ($PSVersionTable.PSVersion.Major -le 5) {
-                    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-                }
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -InformationAction SilentlyContinue -ErrorAction Stop | Out-Null
-
-                $installedProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-
-                if ($installedProvider) {
-                    Write-Verbose "NuGet installed successfully using certificate bypass." 
-                    $nugetInstalled = $true
-                }
-                else {
-                    Write-Verbose "Failed to install NuGet PackageProvider even with certificate bypass."
-                    $nugetInstalled = $false
-                }
-            }
-            catch {
-                Write-Host "Failed to install NuGet PackageProvider: $($_.Exception.Message)" -ForegroundColor Red
-                $nugetInstalled = $false
-            }
+            # No certificate-bypass retry here on purpose - see note above.
+            Write-Host "Failed to install NuGet PackageProvider: $($_.Exception.Message)" -ForegroundColor Red
+            $nugetInstalled = $false
         }
 
         if ($nugetInstalled) {
@@ -318,7 +281,7 @@ Write-Host "NOTE: If some updates failed during installation," -ForegroundColor 
 Write-Host "reboot and rerun the .bat file from C:\Temp\RunWindowsUpdate.bat" -ForegroundColor Yellow
 Write-Host "==============================================="
 Start-Sleep -Seconds 30
-Restart-Computer -Confirm
+Restart-Computer -Force
 
 "@ | Out-File -FilePath $updateScriptPath -Force
 

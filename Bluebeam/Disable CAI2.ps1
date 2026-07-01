@@ -1,4 +1,4 @@
-<# 
+﻿<# 
 .SYNOPSIS
   Disables Microsoft-Windows-CAPI2/Operational logging.
 

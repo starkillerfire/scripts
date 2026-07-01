@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 param (
     [string]$Architecture = "x64",
     [string]$Platform     = "Windows",
@@ -19,9 +19,11 @@ function Install-Chrome {
             throw "msiexec exited $($proc.ExitCode)"
         }
         Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
+        return $true
     } catch {
         Write-Output ""
         Write-Output "Error installing Chrome: $_"
+        return $false
     }
 }
 
@@ -35,21 +37,21 @@ function Install-Edge {
         $response = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -ErrorAction Stop
     } catch {
         Write-Error "Failed to retrieve Edge API JSON: $_"
-        return
+        return $false
     }
 
     $channelObj = $response | Where-Object { $_.Product -eq $Channel }
-    if (-not $channelObj) { Write-Error "Channel '$Channel' not found in API response."; return }
+    if (-not $channelObj) { Write-Error "Channel '$Channel' not found in API response."; return $false }
 
     $filtered = $channelObj.Releases |
         Where-Object { $_.Platform -eq $Platform -and $_.Architecture -eq $Architecture }
-    if (-not $filtered) { Write-Error "No releases found for $Platform/$Architecture."; return }
+    if (-not $filtered) { Write-Error "No releases found for $Platform/$Architecture."; return $false }
 
     $latestRelease = $filtered | Sort-Object { [version]$_.ProductVersion } -Descending | Select-Object -First 1
-    if (-not $latestRelease) { Write-Error "Could not identify the latest Edge release."; return }
+    if (-not $latestRelease) { Write-Error "Could not identify the latest Edge release."; return $false }
 
     $artifact = $latestRelease.Artifacts | Where-Object { $_.Location -match "\.msi$" } | Select-Object -First 1
-    if (-not $artifact) { Write-Error "MSI artifact not found for latest Edge release."; return }
+    if (-not $artifact) { Write-Error "MSI artifact not found for latest Edge release."; return $false }
 
     try {
         $path = "$PSScriptRoot\MicrosoftEdgeEnterpriseX64.msi"
@@ -59,8 +61,10 @@ function Install-Edge {
             throw "msiexec exited $($proc.ExitCode)"
         }
         Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
+        return $true
     } catch {
         Write-Output "Error installing Edge: $_"
+        return $false
     }
 }
 
@@ -70,6 +74,7 @@ function Install-DotNet {
     try {
         winget install Microsoft.DotNet.DesktopRuntime.8 -e --accept-package-agreements --accept-source-agreements --silent
         if ($LASTEXITCODE -ne 0) { throw "winget exited $LASTEXITCODE" }
+        return $true
     } catch {
         try {
             $uri  = "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.18/windowsdesktop-runtime-8.0.18-win-x64.exe"
@@ -78,9 +83,11 @@ function Install-DotNet {
             $proc = Start-Process -Wait -FilePath $path -ArgumentList '/install','/quiet','/norestart' -PassThru
             if ($proc.ExitCode -notin @(0, 3010)) { throw "Installer exited $($proc.ExitCode)" }
             Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
+            return $true
         } catch {
             Write-Output ""
             Write-Output "Error installing .NET Desktop Runtime: $_"
+            return $false
         }
     }
 }
@@ -90,6 +97,7 @@ function Install-DCU {
     try {
         winget install Dell.CommandUpdate -e --accept-package-agreements --accept-source-agreements --silent
         if ($LASTEXITCODE -ne 0) { throw "winget exited $LASTEXITCODE" }
+        return $true
     } catch {
         try {
             # NOTE: Update this URL when a new DCU version ships
@@ -100,19 +108,30 @@ function Install-DCU {
             $proc = Start-Process -Wait -FilePath $path -ArgumentList '/s',"/l=$PSScriptRoot\dcu-install.log" -PassThru
             if ($proc.ExitCode -notin @(0, 3010)) { throw "Installer exited $($proc.ExitCode)" }
             Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
+            return $true
         } catch {
             Write-Output ""
             Write-Output "Error installing Dell Command Update: $_"
+            return $false
         }
     }
 }
 
 ########################
 
-try { Install-Edge   } catch { Write-Error "Error installing Edge: $_"   }
-try { Install-Chrome } catch { Write-Error "Error installing Chrome: $_" }
-try { Install-DotNet } catch { Write-Error "Error installing .NET Desktop Runtime: $_" }
+$results = [ordered]@{}
+try { $results['Edge']   = Install-Edge   } catch { Write-Error "Error installing Edge: $_";   $results['Edge']   = $false }
+try { $results['Chrome'] = Install-Chrome } catch { Write-Error "Error installing Chrome: $_"; $results['Chrome'] = $false }
+try { $results['.NET']   = Install-DotNet } catch { Write-Error "Error installing .NET Desktop Runtime: $_"; $results['.NET'] = $false }
 
 # WIP: DCU installer via direct download still returns Access Denied on some images.
 # Winget path works when available; direct download is the fallback.
-try { Install-DCU    } catch { Write-Error "Error installing Dell Command Update: $_" }
+try { $results['DCU']    = Install-DCU    } catch { Write-Error "Error installing Dell Command Update: $_"; $results['DCU'] = $false }
+
+$failedComponents = $results.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object { $_.Key }
+if ($failedComponents) {
+    Write-Output ""
+    Write-Output "One or more components failed to install: $($failedComponents -join ', ')"
+    exit 1
+}
+exit 0

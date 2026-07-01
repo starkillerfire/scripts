@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Convert .doc and .docm files to .docx and .pdf using Word COM interop.
@@ -57,7 +57,12 @@ Write-Log "Found $($files.Count) file(s). Starting conversion..."
 
 $word = $null
 try {
-    $word = New-Object -ComObject Word.Application
+    try {
+        $word = New-Object -ComObject Word.Application
+    } catch {
+        Write-Log "ERROR: Could not start Word - is Microsoft Word installed/licensed on this machine? $($_.Exception.Message)"
+        throw
+    }
     $word.Visible = $false
 
     foreach ($file in $files) {
@@ -103,8 +108,17 @@ try {
     }
 } finally {
     if ($null -ne $word) {
-        try { $word.Quit() } catch {}
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+        $wordPid = $null
+        try { $wordPid = $word.Application.PID } catch {}
+        try {
+            $word.Quit()
+        } catch {
+            Write-Log "WARNING: Word.Quit() failed; attempting to kill the process directly. $($_.Exception.Message)"
+            if ($wordPid) {
+                try { Stop-Process -Id $wordPid -Force -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+        try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null } catch {}
         $word = $null
     }
 }

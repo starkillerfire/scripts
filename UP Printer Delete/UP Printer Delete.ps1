@@ -1,4 +1,4 @@
-<# Remove Universal Print printers by exact DisplayName (or share DisplayName)
+﻿<# Remove Universal Print printers by exact DisplayName (or share DisplayName)
    using UniversalPrintManagement. Implements:
    2) Preflight access check + reauth
    4) Unified retry wrapper with backoff + reauth (now shows Last error and avoids retry on 403/409)
@@ -11,99 +11,24 @@
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
 param(
   [switch]$DryRun,
-  [string]$NamesFile,
+  # Defaults to PrinterNames.txt beside this script (one name per line) -
+  # pass -NamesFile to point at a different list instead.
+  [string]$NamesFile = (Join-Path $PSScriptRoot 'PrinterNames.txt'),
   [string[]]$Include,
   [string[]]$Exclude,
   [switch]$ListOnly,
   [switch]$ForceSwitchAccount
 )
 
-# ---- Names to remove (or pass -NamesFile) ----
-$EmbeddedNames = @'
-Xerox 8135.25
-BOR-CPN-GCP-FIRESTATION
-Xerox 8135.114
-Xerox 8070.105
-Xerox 7020.14
-Xerox 7030.172
-Xerox 7525.121
-Xerox 7836.190
-Xerox 7856.50
-Xerox 6515
-Xerox 6515.3
-Xerox 6515.8
-Xerox 6515.9
-Xerox 6515.13
-Xerox 6515.41
-Xerox 6515.51
-Xerox 6515.58
-Xerox 6515.59
-Xerox 6515.64
-Xerox 6515.136
-Xerox 6515.139
-Xerox 6515.163
-Xerox 6515.195
-Xerox 6515.xx
-ibr2wconn028p
-IBR2WCOCN028P
-IBR2WCOXX158P
-IBR2WCOXX48P
-IBR2WCOHP125P
-IBR2WCOHP069P
-IBR2WCOHP154P
-IBR2WCOKY119P
-IBR2WCOKY157P
-IBR2WCOSTGRP
-IBR2WEOCN204P
-IBR2WEOC3830IP
-IBR2WEOHP4250P
-IBR2WHAHP27P
-IBR2WHAKY26P
-IBR2WRMHP032P
-IBR2WRMHP057P
-IBR2WRMHP056P
-IBR2WRMHP56P
-IBR2WRMHP150P
-IBR2WRMHP151P
-IBR2WRMHP153P
-IBR2WRMHP157P
-IBR2WRMHP164P
-IBR2WRMRH043P
-IBR2WRMXX45P
-IBR2WRMXX46P
-IBR2FOOMPCOXX3P
-Q11HPT1200
-Q2HPT520
-Q1HPM476
-Q1XEROX7835
-Q3XEROX7835
-q2xerox7835
-HP T7100.38
-HP T1100.161
-TR333 Xerox 7970
-TR333 Xerox 7970 GPD PS
-IBR1GCPX815576P
-IBR1GCPXRX217
-IBR1GCPXRX138P
-IBR1GCPXEROXP67
-IBR1GCPXEROXP128
-IBR1HHPSHARP9
-IBR1HHPSHARP42
-IBR1HHPSHARP152
-IBR1HHPSHARP153
-IBR1HHPSHARP155
-'@
-
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
   Write-Warning "UniversalPrintManagement targets Windows PowerShell 5.1 (Desktop). You're running: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion)"
 }
 
 # Build target list
-if ($NamesFile -and (Test-Path -LiteralPath $NamesFile)) {
-  $TargetList = Get-Content -LiteralPath $NamesFile | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-} else {
-  $TargetList = $EmbeddedNames -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+if (-not (Test-Path -LiteralPath $NamesFile)) {
+  throw "Printer names file not found: $NamesFile. Pass -NamesFile to point at a different list, or restore PrinterNames.txt beside this script."
 }
+$TargetList = Get-Content -LiteralPath $NamesFile | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 $TargetList = $TargetList | Select-Object -Unique
 
 # Optional Include/Exclude filtering (wildcards allowed)
@@ -392,7 +317,7 @@ foreach ($nf in $notFound) { Write-UPLog $nf '' 'Lookup' 'NotFound' 'No printer 
 if ($ListOnly) {
   $printersToDelete | Select-Object DisplayName,Id | Format-Table -AutoSize
   Write-Host "Matched $($printersToDelete.Count) printers. Nothing deleted due to -ListOnly."
-  return
+  exit 0
 }
 
 # ---- Unshare & delete with progress, retries, idempotency ----
@@ -478,3 +403,5 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $path  = Join-Path $PWD ("UP-Removal-Log-{0}.csv" -f $stamp)
 $Log | Export-Csv -Path $path -NoTypeInformation -Encoding UTF8
 Write-Host "Log written to $path"
+
+exit ($(if (($errDeletes + $errUnshares) -gt 0) { 1 } else { 0 }))
