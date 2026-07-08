@@ -44,6 +44,36 @@
     .\Win11_STIG_Comprehensive_SCAP_Remediation_v3_PostSCAP_Local.ps1 -ScapXmlPath .\U_MS_Windows_11_V2R8_STIG_SCAP_1-4_Benchmark-enhancedV17-signed[1].xml -StartupPin $pin -CertSourcePath C:\Temp\DoD_Certs -AllowBroadRemediationWithResultTargeting
 #>
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCTION INDEX (this file is single-file by design - copied onto and run
+# directly on the machine it baselines - so it stays one file; the #region
+# blocks below and this index exist purely to make ~2600 lines/76 functions
+# navigable in an editor with folding, e.g. VS Code/ISE "Fold All").
+#
+#   Parameters, Elevation & Bootstrap ............ script params, self-elevation, script-scope state
+#   Core Logging & Native Command Helpers ........ Write-Section, Add-OutstandingItem, transcript, Invoke-NativeCommand
+#   Registry Value & Per-User Registry Helpers ... Set/Remove-StigRegistryValue, OVAL type conversion, safety allowlist,
+#                                                   orphaned-hive cleanup, per-user (NTUSER.DAT) registry writes
+#   Service, Feature, Capability & Audit Policy ... Disable-StigService/-OptionalFeature, Remove-StigWindowsCapability, Set-AuditPolicy
+#   Domain, Security Template & Certificates ..... Get-DomainContext, Invoke-StigSecurityTemplate, Import-StigCertificateIfMissing,
+#                                                   built-in account rename
+#   BitLocker, Time & LAPS ........................ Invoke-BitLockerRemediation, Set-StigWindowsTime, LAPS policy processing
+#   Interactive Menu .............................. Read-StigYesNo, Invoke-StigInteractiveMenu
+#   System Readiness & Local Admin Review ........ Invoke-StigSystemReadiness, Invoke-LocalAdminGroupReview
+#   Reporting Helpers ............................. certificate/firewall-preview reports, post-reboot resume script,
+#                                                   operator summary, USB export
+#   Backup ......................................... Export-StigBackup (registry/secedit/audit/firewall/service/inventory)
+#   SCAP/XCCDF XML Import & OVAL Interpretation ... XML node helpers, benchmark version detection, SCAP XML signature
+#                                                   verification (Test-ScapXmlSignature), Import-ScapContent, OVAL lookups
+#   SCAP-Driven Remediation ....................... registry + audit policy actions derived directly from the loaded SCAP XML
+#   PowerSTIG / Local Policy / Hard-Coded Remediation .. PowerSTIG DSC baseline, local security policy, hard-coded registry
+#                                                   fallbacks, and the per-category remediation orchestrators
+#   Rule Targeting & Assessment-Result Helpers ... CKL/XCCDF/CSV import, which rule IDs are in scope for this run
+#   Validation, Coverage Reporting & Summary ...... post-remediation validation, coverage CSV/report, final operator summary
+#   Main Execution ................................ the actual top-to-bottom run, see the banner further down
+# ─────────────────────────────────────────────────────────────────────────────
+
+#region Parameters, Elevation & Bootstrap
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
@@ -135,6 +165,16 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$ResumePostRebootValidation,
 
+    # -ResumePostRebootValidation on its own has nothing to verify against -
+    # it just skips straight to post-validation/reporting. This checks for a
+    # small marker file written right after remediation completed and a
+    # reboot was scheduled, so a crashed/interrupted run doesn't get quietly
+    # reported as if it had finished cleanly. Pass -Force to proceed anyway
+    # (e.g. resuming by hand after independently confirming remediation did
+    # complete).
+    [Parameter(Mandatory = $false)]
+    [switch]$Force,
+
     [Parameter(Mandatory = $false)]
     [switch]$SkipSystemReadiness,
 
@@ -163,27 +203,48 @@ param(
     [string]$UsbExportPath,
 
     [Parameter(Mandatory = $false)]
-    [switch]$SkipCertificateReport
+    [switch]$SkipCertificateReport,
+
+    # Internal marker set by the elevation relaunch below when the original,
+    # non-elevated invocation had -StartupPin bound. SecureString parameters
+    # cannot be safely forwarded across a relaunch (there is no way to pass
+    # one on a command line without writing the PIN out in plain text, which
+    # would defeat the entire point of using a SecureString), so instead of
+    # silently dropping it, the elevated instance re-prompts for the PIN
+    # itself when it sees this switch.
+    [Parameter(Mandatory = $false)]
+    [switch]$PromptForStartupPin
 )
 
 # Prompt for elevation if not already running as administrator
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Warning 'This script requires administrator privileges. Relaunching elevated...'
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    $needsPinPrompt = $false
     foreach ($key in $PSBoundParameters.Keys) {
         $val = $PSBoundParameters[$key]
         if ($val -is [switch]) {
             if ($val.IsPresent) { $argList += "-$key" }
         } elseif ($val -is [securestring]) {
-            Write-Warning "Parameter -$key (SecureString) cannot be forwarded when relaunching elevated. You will be prompted again."
+            Write-Warning "Parameter -$key (SecureString) cannot be forwarded when relaunching elevated - the elevated instance will prompt for it instead."
+            if ($key -eq 'StartupPin') { $needsPinPrompt = $true }
         } elseif ($val -is [string[]]) {
             foreach ($item in $val) { $argList += "-$key", "`"$item`"" }
         } else {
             $argList += "-$key", "`"$val`""
         }
     }
+    if ($needsPinPrompt) { $argList += '-PromptForStartupPin' }
     Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs
     exit
+}
+
+# If the non-elevated invocation had -StartupPin bound, the relaunch above
+# could not forward the SecureString value itself - prompt for it now, in
+# the elevated session, so BitLocker TPM+PIN remediation further down
+# actually gets a PIN instead of silently treating this as "not supplied".
+if ($PromptForStartupPin -and -not $StartupPin) {
+    $StartupPin = Read-Host -Prompt 'Enter the BitLocker startup PIN' -AsSecureString
 }
 
 Set-StrictMode -Version Latest
@@ -222,7 +283,9 @@ $script:OperatorSummaryPath = $null
 $script:RebootResumeScriptPath = $null
 $script:UsbExportDestination = $null
 $script:BackupOnly = $false
+#endregion Parameters, Elevation & Bootstrap
 
+#region Core Logging & Native Command Helpers
 function Write-Section {
     param([Parameter(Mandatory)][string]$Message)
     Write-Host ''
@@ -278,6 +341,12 @@ function Invoke-NativeCommand {
     $output = & $FilePath @ArgumentList 2>&1
     $exitCode = $LASTEXITCODE
 
+    # Exposed for callers using -IgnoreExitCode who still need to know
+    # whether the command actually succeeded (e.g. reg.exe load/unload in
+    # Set-PerUserRegistryValue) without changing this function's existing
+    # return-value contract for the other ~20 call sites.
+    $script:LastNativeExitCode = $exitCode
+
     if ($output) {
         $output | ForEach-Object { Write-Verbose $_ }
     }
@@ -288,7 +357,9 @@ function Invoke-NativeCommand {
 
     return $output
 }
+#endregion Core Logging & Native Command Helpers
 
+#region Registry Value & Per-User Registry Helpers
 function Set-StigRegistryValue {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -340,6 +411,28 @@ function Convert-RegistryPathFromOval {
 }
 
 function Convert-OvalDataTypeToRegistryType {
+    <#
+    .DESCRIPTION
+        Only ever receives $DataType 'int' or 'string' in practice:
+        Convert-OvalValueForRegistry (the only caller of this function's
+        caller) already rejects every other OVAL datatype - including
+        'boolean' - before a value gets this far, returning $null for
+        anything it doesn't recognize. So DWord/String are the only
+        registry types this function needs to produce; QWord/MultiString
+        are supported by Set-StigRegistryValue but are simply never
+        reachable via this OVAL-driven path today. If Convert-OvalValueForRegistry
+        is ever extended to accept more OVAL datatypes, extend this
+        function's mapping to match at that point - adding speculative
+        handling for datatypes that can never arrive here isn't testable
+        and isn't worth the risk in a script that writes real system
+        registry values.
+
+        The '$Key -notmatch 'Winlogon$'' carve-out below is intentional,
+        not a gap: some Winlogon values (e.g. AutoAdminLogon) are
+        legitimately stored as REG_SZ even though their content looks like
+        a plain integer ("1"), so numeric-looking Winlogon values are left
+        as String rather than being coerced to DWord.
+    #>
     param(
         [string]$DataType,
         [object]$Value,
@@ -389,7 +482,17 @@ function Test-SafeRegistryTarget {
         'software\microsoft\windows\currentversion\policies\laps',
         'software\microsoft\policymanager\current\device\connectivity',
         'software\microsoft\wcmsvc\wifinetworkmanager\config',
-        'software\classes\',
+        # Narrowed from a blanket 'software\classes\' (which would have
+        # allowlisted SCAP-driven writes to the entire COM/file-association
+        # registration hive) to the specific "Run as different user"
+        # suppression subkeys this script actually writes to elsewhere
+        # (see the runasuser SuppressionPolicy fix in
+        # Invoke-HardCodedRegistryRemediation) - those are the only
+        # confirmed-necessary Classes-hive targets in this script.
+        'software\classes\batfile\shell\runasuser',
+        'software\classes\cmdfile\shell\runasuser',
+        'software\classes\exefile\shell\runasuser',
+        'software\classes\mscfile\shell\runasuser',
         'software\microsoft\bluetoothauthenticationagent'
     )
 
@@ -397,6 +500,38 @@ function Test-SafeRegistryTarget {
         if ($lower.StartsWith($prefix)) { return $true }
     }
     return $false
+}
+
+function Clear-OrphanedRegistryHives {
+    <#
+    .SYNOPSIS
+        Finds and force-unloads leftover HKU\TEMP_* hive mounts from a
+        previous run of this script that was interrupted before it could
+        unload them (e.g. a crash between reg.exe load and unload in
+        Set-PerUserRegistryValue).
+    .DESCRIPTION
+        A leftover mount keeps that user's NTUSER.DAT locked, which makes
+        every subsequent reg.exe load for the same user fail silently -
+        without this check, per-user remediation for that profile would
+        just keep getting skipped on every run with no indication why.
+        Run this once, early, before any per-user remediation.
+    #>
+    $orphans = Get-ChildItem -Path 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -like 'TEMP_*' }
+
+    foreach ($orphan in $orphans) {
+        Write-Warning "Found an orphaned registry hive mount from a previous run: HKU\$($orphan.PSChildName) - attempting to unload it."
+        try {
+            Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('unload', "HKU\$($orphan.PSChildName)") -IgnoreExitCode | Out-Null
+            if ($script:LastNativeExitCode -eq 0) {
+                Write-Section "Unloaded orphaned hive HKU\$($orphan.PSChildName)"
+            } else {
+                Add-OutstandingItem "Could not unload orphaned registry hive HKU\$($orphan.PSChildName) left over from a previous run (reg.exe unload exit code $script:LastNativeExitCode). Per-user remediation for the corresponding profile will keep being skipped until this is cleared manually."
+            }
+        } catch {
+            Add-OutstandingItem "Error while attempting to unload orphaned registry hive HKU\$($orphan.PSChildName): $($_.Exception.Message)"
+        }
+    }
 }
 
 function Set-PerUserRegistryValue {
@@ -429,30 +564,54 @@ function Set-PerUserRegistryValue {
         if (-not $ntUser -or -not (Test-Path -LiteralPath $ntUser)) { continue }
 
         $mountName = 'TEMP_' + ($sid -replace '-', '_')
+        $loaded = $false
         try {
             Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('load', "HKU\$mountName", $ntUser) -IgnoreExitCode | Out-Null
+            if ($script:LastNativeExitCode -ne 0) {
+                Add-OutstandingItem "Could not load registry hive for user $sid ($ntUser) - reg.exe load exit code $script:LastNativeExitCode. Per-user setting '$Name' under $SubKey was not applied for this user."
+                continue
+            }
+            $loaded = $true
             $mountedTarget = "Registry::HKEY_USERS\$mountName\$SubKey"
             Set-StigRegistryValue -Path $mountedTarget -Name $Name -Type $Type -Value $Value
         }
         finally {
-            Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('unload', "HKU\$mountName") -IgnoreExitCode | Out-Null
+            if ($loaded) {
+                Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('unload', "HKU\$mountName") -IgnoreExitCode | Out-Null
+                if ($script:LastNativeExitCode -ne 0) {
+                    Add-OutstandingItem "Could not unload registry hive HKU\$mountName for user $sid after remediation - it may still be mounted. Check Registry Editor and unload it manually (reg.exe unload HKU\$mountName) before this script runs again for this user."
+                }
+            }
         }
     }
 
     $defaultNtUser = 'C:\Users\Default\NTUSER.DAT'
     if (Test-Path -LiteralPath $defaultNtUser) {
         $mountName = 'TEMP_DEFAULT_USER'
+        $loaded = $false
         try {
             Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('load', "HKU\$mountName", $defaultNtUser) -IgnoreExitCode | Out-Null
+            if ($script:LastNativeExitCode -ne 0) {
+                Add-OutstandingItem "Could not load the Default user registry hive ($defaultNtUser) - reg.exe load exit code $script:LastNativeExitCode. Setting '$Name' under $SubKey was not applied to the Default user profile, so it will not take effect for new user accounts."
+                return
+            }
+            $loaded = $true
             $target = "Registry::HKEY_USERS\$mountName\$SubKey"
             Set-StigRegistryValue -Path $target -Name $Name -Type $Type -Value $Value
         }
         finally {
-            Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('unload', "HKU\$mountName") -IgnoreExitCode | Out-Null
+            if ($loaded) {
+                Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('unload', "HKU\$mountName") -IgnoreExitCode | Out-Null
+                if ($script:LastNativeExitCode -ne 0) {
+                    Add-OutstandingItem "Could not unload registry hive HKU\$mountName (Default user) after remediation - it may still be mounted. Check Registry Editor and unload it manually (reg.exe unload HKU\$mountName) before this script runs again."
+                }
+            }
         }
     }
 }
+#endregion Registry Value & Per-User Registry Helpers
 
+#region Service, Feature, Capability & Audit Policy Helpers
 function Disable-StigService {
     param([Parameter(Mandatory)][string]$Name)
     $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
@@ -504,7 +663,9 @@ function Set-AuditPolicy {
     $failureArg = if ($Failure) { 'enable' } else { 'disable' }
     Invoke-NativeCommand -FilePath auditpol.exe -ArgumentList @('/set', "/subcategory:$Subcategory", "/success:$successArg", "/failure:$failureArg") | Out-Null
 }
+#endregion Service, Feature, Capability & Audit Policy Helpers
 
+#region Domain, Security Template & Certificates
 function Get-DomainContext {
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem
     $partOfDomain = [bool]$cs.PartOfDomain
@@ -632,7 +793,9 @@ function Rename-BuiltInAccounts {
         }
     }
 }
+#endregion Domain, Security Template & Certificates
 
+#region BitLocker, Time & LAPS
 function Invoke-BitLockerRemediation {
     param([Parameter(Mandatory)][securestring]$Pin)
 
@@ -718,7 +881,9 @@ function Invoke-StigLapsPolicyProcessing {
 
     try { Invoke-LapsPolicyProcessing | Out-Null } catch { Add-OutstandingItem "Windows LAPS policy processing failed: $($_.Exception.Message)" }
 }
+#endregion BitLocker, Time & LAPS
 
+#region Interactive Menu
 function Read-StigYesNo {
     param(
         [Parameter(Mandatory)][string]$Prompt,
@@ -776,7 +941,9 @@ function Invoke-StigInteractiveMenu {
 
     return $result
 }
+#endregion Interactive Menu
 
+#region System Readiness & Local Admin Review
 function Invoke-StigSystemReadiness {
     param([Parameter(Mandatory)][string]$OutputRoot)
 
@@ -927,7 +1094,9 @@ function Invoke-LocalAdminGroupReview {
         }
     }
 }
+#endregion System Readiness & Local Admin Review
 
+#region Reporting Helpers
 function Get-StigCertificateRequirements {
     @(
         [pscustomobject]@{ StorePath='Cert:\LocalMachine\Root';       Thumbprint='D73CA91102A2204A36459ED32213B467D7CE97FB'; SubjectLike='DoD Root CA 3' },
@@ -1007,6 +1176,11 @@ function Export-FirewallScopePreview {
     return $path
 }
 
+function Get-StigResumeMarkerPath {
+    param([Parameter(Mandatory)][string]$OutputRoot)
+    Join-Path $OutputRoot '.stig_resume_state.json'
+}
+
 function New-PostRebootValidationScript {
     param([Parameter(Mandatory)][string]$OutputRoot)
     if (-not $PSCommandPath) { return }
@@ -1022,6 +1196,17 @@ function New-PostRebootValidationScript {
     Set-Content -Path $path -Value $lines -Encoding UTF8
     $script:RebootResumeScriptPath = $path
     Write-Host "Post-reboot validation helper: $path" -ForegroundColor Green
+
+    # Marker confirming remediation genuinely completed on THIS machine
+    # before the reboot - -ResumePostRebootValidation checks for this so an
+    # interrupted/crashed run doesn't get reported as if it had finished
+    # cleanly.
+    $markerPath = Get-StigResumeMarkerPath -OutputRoot $OutputRoot
+    [pscustomobject]@{
+        ComputerName  = $env:COMPUTERNAME
+        CompletedUtc  = (Get-Date).ToUniversalTime().ToString('o')
+        ScapXmlPath   = $script:LoadedScapXmlPath
+    } | ConvertTo-Json | Set-Content -Path $markerPath -Encoding UTF8
 }
 
 function Get-StigStatusCountsFromCsv {
@@ -1135,7 +1320,9 @@ function Invoke-EndOfRunReportActions {
         Copy-StigRunArtifactsToUsb -DestinationRoot $UsbExportPath
     }
 }
+#endregion Reporting Helpers
 
+#region Backup
 function Export-StigBackup {
     param([Parameter(Mandatory)][string]$RootPath)
     Write-Section 'Exporting pre-change backups and rollback package'
@@ -1244,7 +1431,9 @@ Write-Warning 'Reboot after rollback if registry, security policy, VBS, firewall
     Write-Host "Rollback script: $rollbackPath" -ForegroundColor Green
     return $backupPath
 }
+#endregion Backup
 
+#region SCAP/XCCDF XML Import & OVAL Interpretation
 function Get-LocalChild {
     param(
         [Parameter(Mandatory)][System.Xml.XmlNode]$Node,
@@ -1594,7 +1783,9 @@ function Convert-OvalValueForRegistry {
 
     [pscustomobject]@{ DataType=$datatype; Operation=$operation; Value=$value }
 }
+#endregion SCAP/XCCDF XML Import & OVAL Interpretation
 
+#region SCAP-Driven Remediation
 function Get-ScapDrivenRegistryActions {
     $actions = New-Object System.Collections.Generic.List[object]
 
@@ -1775,7 +1966,9 @@ function Invoke-ScapDrivenAuditPolicy {
     }
     Write-Host "Audit subcategories targeted: $($desired.Keys.Count)" -ForegroundColor Green
 }
+#endregion SCAP-Driven Remediation
 
+#region PowerSTIG / Local Policy / Hard-Coded Remediation
 function Invoke-PowerStigBaseline {
     if ($SkipPowerSTIG) { return }
     Write-Section 'Applying PowerSTIG DSC baseline when available'
@@ -2137,8 +2330,9 @@ function Invoke-FirewallScopeRemediation {
         catch { Add-OutstandingItem "Failed to scope firewall rule '$($_.DisplayName)': $($_.Exception.Message)" }
     }
 }
+#endregion PowerSTIG / Local Policy / Hard-Coded Remediation
 
-
+#region Rule Targeting & Assessment-Result Helpers
 function New-RuleIdHashSet {
     return (New-Object -TypeName 'System.Collections.Generic.HashSet[string]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase))
 }
@@ -2227,7 +2421,9 @@ function Import-AssessmentResultTargeting {
     Write-Host "Matching STIG rules targeted: $($targetedRules.Count)" -ForegroundColor Green
     if ($targetedRules.Count -eq 0) { throw 'Assessment result file was read, but no failed findings matched the loaded Windows 11 STIG XML rule inventory.' }
 }
+#endregion Rule Targeting & Assessment-Result Helpers
 
+#region Validation, Coverage Reporting & Summary
 function Get-StigRegistryValue {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
@@ -2439,7 +2635,9 @@ function Invoke-StigValidationSummary {
         Write-Warning "Outstanding/manual items: $($script:OutstandingItems.Count). See summary file."
     }
 }
+#endregion Validation, Coverage Reporting & Summary
 
+#region Main Execution
 # ─────────────────────────────────────────────────────────────────────────────
 # Main execution
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2455,6 +2653,8 @@ $script:TranscriptPath = Join-Path (Join-Path $env:ProgramData 'PowerSTIG') ("Wi
 Start-StigTranscript -Path $script:TranscriptPath
 
 try {
+    Clear-OrphanedRegistryHives
+
     $menuSettings = Invoke-StigInteractiveMenu
     if ($menuSettings) {
         foreach ($key in $menuSettings.Keys) {
@@ -2494,6 +2694,24 @@ try {
 
     if ($ResumePostRebootValidation) {
         Write-Warning 'ResumePostRebootValidation was specified. No remediation will be performed; post-validation/reporting only.'
+
+        $resumeMarkerPath = Get-StigResumeMarkerPath -OutputRoot $ReportRoot
+        $resumeMarkerOk = $false
+        if (Test-Path -LiteralPath $resumeMarkerPath) {
+            try {
+                $marker = Get-Content -LiteralPath $resumeMarkerPath -Raw | ConvertFrom-Json
+                if ($marker.ComputerName -eq $env:COMPUTERNAME) { $resumeMarkerOk = $true }
+                else { Write-Warning "Resume marker at $resumeMarkerPath was written for computer '$($marker.ComputerName)', not this machine ('$env:COMPUTERNAME')." }
+            } catch {
+                Write-Warning "Resume marker at $resumeMarkerPath could not be read: $($_.Exception.Message)"
+            }
+        } else {
+            Write-Warning "No resume marker found at $resumeMarkerPath."
+        }
+        if (-not $resumeMarkerOk -and -not $Force) {
+            throw "ResumePostRebootValidation could not confirm that a prior remediation run actually completed on this machine before the reboot (see warning above). Reporting post-reboot results without that confirmation risks treating an interrupted/crashed run as if it finished cleanly. Re-run with -Force to proceed anyway if you have independently confirmed remediation completed."
+        }
+
         if (-not $SkipPostValidation) {
             $postReport = Join-Path $ReportRoot ("Win11_STIG_PostRebootValidation_Detail_{0:yyyyMMdd_HHmmss}.csv" -f (Get-Date))
             $postSummary = Join-Path $ReportRoot ("Win11_STIG_PostRebootValidation_Summary_{0:yyyyMMdd_HHmmss}.txt" -f (Get-Date))
@@ -2587,3 +2805,4 @@ finally {
         $script:TranscriptActive = $false
     }
 }
+#endregion Main Execution

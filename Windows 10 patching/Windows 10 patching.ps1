@@ -25,6 +25,9 @@ param(
     [int]         $MaxRetry            = 3,
 
     # ---------- logging ----------
+    # Placeholder path - update for this site, or pass -CentralLogShare.
+    # An unreachable share already fails loudly below (Test-Path check),
+    # so this won't silently skip logging if left unconfigured.
     [string]      $CentralLogShare     = "\\fileserver\PatchLogs",
 
     # ---------- credentials ----------

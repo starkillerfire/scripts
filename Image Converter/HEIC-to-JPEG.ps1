@@ -20,6 +20,10 @@
 .PARAMETER Recurse
     Search SourceFolder recursively for .heic files.
 
+.PARAMETER LogFile
+    Path to a plaintext log of the conversion run. Defaults to
+    conversion_log.txt inside OutputFolder.
+
 .EXAMPLE
     .\HEIC-to-JPEG.ps1 -SourceFolder C:\Photos\HEIC -OutputFolder C:\Photos\JPEG
 
@@ -36,7 +40,9 @@ param(
     [ValidateRange(1, 100)]
     [int]    $Quality = 95,
 
-    [switch] $Recurse
+    [switch] $Recurse,
+
+    [string] $LogFile
 )
 
 Set-StrictMode -Version Latest
@@ -48,13 +54,21 @@ if (-not (Test-Path $SourceFolder)) { throw "Source folder not found: $SourceFol
 # --- Default output folder ---
 if (-not $OutputFolder) { $OutputFolder = Join-Path $SourceFolder 'JPEG' }
 if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
+if (-not $LogFile) { $LogFile = Join-Path $OutputFolder 'conversion_log.txt' }
+
+function Write-Log {
+    param([string]$Message)
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
+    Write-Host $line
+    Add-Content -Path $LogFile -Value $line -Encoding UTF8
+}
 
 # --- Ensure HEIF extension is present ---
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
 if (-not (Get-AppxPackage -Name Microsoft.HEIFImageExtension -ErrorAction SilentlyContinue)) {
-    Write-Host "HEIF Image Extensions not found - attempting winget install..."
+    Write-Log "HEIF Image Extensions not found - attempting winget install..."
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         throw "winget not available. Install HEIF Image Extensions manually from the Microsoft Store (search 'HEIF Image Extensions')."
     }
@@ -62,7 +76,7 @@ if (-not (Get-AppxPackage -Name Microsoft.HEIFImageExtension -ErrorAction Silent
     if (-not (Get-AppxPackage -Name Microsoft.HEIFImageExtension -ErrorAction SilentlyContinue)) {
         throw "HEIF extension install failed. Install it manually from the Microsoft Store."
     }
-    Write-Host "HEIF Image Extensions installed."
+    Write-Log "HEIF Image Extensions installed."
 }
 
 # --- Discover files ---
@@ -71,11 +85,11 @@ if ($Recurse) { $getChildArgs['Recurse'] = $true }
 $files = Get-ChildItem @getChildArgs
 
 if ($files.Count -eq 0) {
-    Write-Host "No .heic files found in $SourceFolder"
-    return
+    Write-Log "No .heic files found in $SourceFolder"
+    exit 0
 }
 
-Write-Host "Converting $($files.Count) file(s) at quality $Quality..."
+Write-Log "Converting $($files.Count) file(s) at quality $Quality..."
 
 $converted = 0
 $skipped   = 0
@@ -106,13 +120,14 @@ foreach ($file in $files) {
         try   { $encoder.Save($stream) }
         finally { $stream.Dispose() }
 
-        Write-Host "Converted: $($file.Name)"
+        Write-Log "Converted: $($file.Name)"
         $converted++
     } catch {
-        Write-Warning "Failed: $($file.Name) - $_"
+        Write-Log "Failed: $($file.Name) - $_"
         $errored++
     }
 }
 
 Write-Host ""
-Write-Host "Done - $converted converted, $skipped skipped, $errored errors."
+Write-Log "Done - $converted converted, $skipped skipped, $errored errors."
+exit ($(if ($errored -gt 0) { 1 } else { 0 }))

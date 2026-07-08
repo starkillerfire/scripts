@@ -177,11 +177,20 @@ if (-not $Silent) {
     Write-EventLog -LogName Application -Source "WMIRepairScript" -EntryType Information -EventId 1001 -Message "WMI Repair completed on $env:COMPUTERNAME"
 }
 
-# Upload log
-if ($UploadLog -and (Test-Path $CentralLogPath)) {
-    $name = "$env:COMPUTERNAME-$(Get-Date -Format yyyyMMdd_HHmmss).txt"
-    Copy-Item -Path $LogFile -Destination (Join-Path $CentralLogPath $name)
-    Write-Log "Uploaded log to $CentralLogPath"
+# Upload log. -CentralLogPath defaults to a placeholder UNC path
+# ('\\fileserver\logs$\WMIRepair') that won't exist in most environments -
+# confirm/update it for this site. Previously, if -UploadLog was requested
+# but that share wasn't reachable, this step just silently did nothing;
+# now it logs a clear warning instead so a misconfigured/unreachable share
+# doesn't look like a successful, silent no-op.
+if ($UploadLog) {
+    if (Test-Path $CentralLogPath) {
+        $name = "$env:COMPUTERNAME-$(Get-Date -Format yyyyMMdd_HHmmss).txt"
+        Copy-Item -Path $LogFile -Destination (Join-Path $CentralLogPath $name)
+        Write-Log "Uploaded log to $CentralLogPath"
+    } else {
+        Write-Log "UploadLog was requested but CentralLogPath is not reachable: $CentralLogPath (check the path is correct for this site and that this machine has access)" "WARN"
+    }
 }
 
 # Final message and reboot
