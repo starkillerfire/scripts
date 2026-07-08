@@ -566,6 +566,47 @@ if ($state.AvailableUpdates -eq 0x4100) {
     exit 1
 }
 
+# 0x5944 is the marker Set-AvailableUpdates5944 writes before the task
+# itself runs (see the top of this state machine) - if the script was
+# interrupted (crash/power loss/manual Ctrl-C) between setting that marker
+# and the task actually running, a rerun would otherwise fall through to
+# the generic "unexpected state" error below with no way to retry short of
+# manually clearing the registry value. Re-issuing the task here is the
+# same recovery the 0x4100 branch above already does.
+if ($state.AvailableUpdates -eq 0x5944) {
+    Write-Log 'Detected AvailableUpdates=0x5944 with the task apparently not yet run (or interrupted). Re-running the Secure-Boot-Update task.'
+    Start-SecureBootTask
+    Start-Sleep -Seconds 8
+
+    $post = Get-SecureBootSnapshot
+    Write-Log ("Re-run AvailableUpdates     : {0}" -f $post.AvailableUpdatesHex)
+    Write-Log ("Re-run UEFICA2023Status     : {0}" -f $post.UEFICA2023Status)
+    Write-Log ("Re-run UEFICA2023Error      : {0}" -f $post.UEFICA2023ErrorHex)
+    Write-Log ("Re-run UEFICA2023ErrorEvent : {0}" -f $post.UEFICA2023ErrorEvent)
+
+    if ($post.UEFICA2023Error -and $post.UEFICA2023Error -ne 0) {
+        Write-Log 'Secure Boot servicing reported an error after re-running the task. Review the TPM-WMI events in the log.' 'ERROR'
+        exit 1
+    }
+
+    if ($post.DbHas2023 -or $post.UEFICA2023Status -eq 'Updated' -or $post.WindowsUEFICA2023Capable -ge 1) {
+        Write-Log 'UEFI CA 2023 update completed successfully.'
+        exit 0
+    }
+
+    if ($post.AvailableUpdates -eq 0x4100 -or $post.UEFICA2023Status -eq 'InProgress') {
+        Write-Log 'Update phase completed after re-run. Reboot is required before the next phase.'
+        if ($ForceRestart) {
+            Write-Log 'ForceRestart specified. Restarting now.'
+            Restart-Computer -Force
+        }
+        exit 3010
+    }
+
+    Write-Log 'Task was re-run, but the expected post-run state was not observed. Review the log and recent Secure Boot events.' 'ERROR'
+    exit 1
+}
+
 # If already in a pending/in-progress state, avoid resetting to 0x5944.
 if ($state.AvailableUpdates -eq 0x4000 -or $state.UEFICA2023Status -eq 'InProgress') {
     Write-Log 'Secure Boot update is already in progress / pending finalization. Review recent events and allow another reboot / normal boot cycle.'

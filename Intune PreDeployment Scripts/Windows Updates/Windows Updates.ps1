@@ -24,8 +24,16 @@ $script:Skipped=$false
 if(Test-Path $ConfigPath){
     try{
         $cfg=Get-Content $ConfigPath -Raw|ConvertFrom-Json
-        foreach($p in $PSBoundParameters.Keys){
-            if($cfg.PSObject.Properties[$p]){Set-Variable -Name $p -Value $cfg.$p -Force}
+        # Fill in values from the config file only for parameters the
+        # caller did NOT explicitly pass - the previous condition checked
+        # $PSBoundParameters.Keys (only params already passed on the
+        # command line) instead of the inverse, so on a normal no-argument
+        # run (the common case, where $PSBoundParameters is empty) the
+        # config file was silently ignored entirely, and on any run where
+        # it did fire, it backwards-clobbered explicit CLI values with the
+        # config defaults instead of filling in what was missing.
+        foreach($prop in $cfg.PSObject.Properties){
+            if(-not $PSBoundParameters.ContainsKey($prop.Name)){Set-Variable -Name $prop.Name -Value $prop.Value -Force}
         }
     }catch{}
 }
@@ -33,7 +41,13 @@ if(Test-Path $ConfigPath){
 function Write-UpdateEvent{
     param([string]$m,[System.Diagnostics.EventLogEntryType]$t,[int]$id)
     if(-not[Diagnostics.EventLog]::SourceExists('Update-All')){New-EventLog Application 'Update-All'}
-    Write-EventLog Application 'Update-All' $t $id $m
+    # Named parameters here on purpose: Write-EventLog's positional order
+    # is LogName, Source, EventId, EntryType, Message - passing $t (an
+    # EventLogEntryType) and $id (an int) positionally put them in the
+    # EventId/EntryType slots respectively (swapped relative to their real
+    # types), which threw a type-conversion error the first time this ran,
+    # before any update logic executed.
+    Write-EventLog -LogName Application -Source 'Update-All' -EventId $id -EntryType $t -Message $m
 }
 
 function Stop-UpdateScript{

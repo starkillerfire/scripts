@@ -33,7 +33,16 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     # Prefer pwsh (PS7) when available, fall back to Windows PowerShell
     $elevatedExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
-    $elevatedProc = Start-Process $elevatedExe "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs -Wait -PassThru
+    # Rebuild from $PSBoundParameters so a non-default -SourceUrl/-KeepFiles
+    # actually carries through to the elevated instance instead of silently
+    # reverting to the built-in URL and always deleting the work folder.
+    $argList = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    foreach ($key in $PSBoundParameters.Keys) {
+        $val = $PSBoundParameters[$key]
+        if ($val -is [switch]) { if ($val.IsPresent) { $argList += "-$key" } }
+        else { $argList += "-$key", "`"$val`"" }
+    }
+    $elevatedProc = Start-Process $elevatedExe -ArgumentList $argList -Verb RunAs -Wait -PassThru
     exit $elevatedProc.ExitCode
 }
 

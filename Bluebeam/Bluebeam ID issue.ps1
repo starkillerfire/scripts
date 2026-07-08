@@ -122,9 +122,16 @@ function Invoke-CmdOut($file, $cmd, $Arguments) {
 }
 
 # a) Current user's personal & intermediate stores
-Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_my.txt")  "certutil.exe" "-user -store my"
-Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_ca.txt")  "certutil.exe" "-user -store ca"
-Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_root.txt") "certutil.exe" "-user -store root"
+# Wrapped like the LocalMachine/gpresult blocks below: with
+# $ErrorActionPreference = 'Stop' set globally, an unwrapped certutil
+# failure here (missing/blocked certutil.exe, etc.) would abort the whole
+# script before the ZIP ever gets produced - a single hiccup shouldn't cost
+# the technician the entire support bundle.
+try {
+  Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_my.txt")  "certutil.exe" "-user -store my"
+  Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_ca.txt")  "certutil.exe" "-user -store ca"
+  Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_root.txt") "certutil.exe" "-user -store root"
+} catch { Warn "Could not read current-user certificate stores: $($_.Exception.Message)" }
 
 # b) LocalMachine stores (if admin)
 try {
@@ -134,8 +141,10 @@ try {
 } catch { Warn "Could not read LocalMachine stores (need elevation). Skipping." }
 
 # c) Chain engine config & URL cache
-Invoke-CmdOut (Join-Path $DiagDir "cert_chain_config.txt") "certutil.exe" "-getreg chain"
-Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_list.txt") "certutil.exe" "-URLcache *"
+try {
+  Invoke-CmdOut (Join-Path $DiagDir "cert_chain_config.txt") "certutil.exe" "-getreg chain"
+  Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_list.txt") "certutil.exe" "-URLcache *"
+} catch { Warn "Could not read chain config / URL cache: $($_.Exception.Message)" }
 
 # (Optional) clear user CRL/URL cache AFTER we recorded it - opt-in via -ClearUrlCache
 if ($ClearUrlCache) {
@@ -155,10 +164,13 @@ try {
 
 # 6) Zip it all up
 $ZipPath = Join-Path $env:USERPROFILE ("Desktop\\Bluebeam_SupportBundle_$Stamp.zip")
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($OutRoot, $ZipPath)
-
-Ok "Bundle created: $ZipPath"
+try {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  [System.IO.Compression.ZipFile]::CreateFromDirectory($OutRoot, $ZipPath)
+  Ok "Bundle created: $ZipPath"
+} catch {
+  Warn "Could not create the ZIP bundle: $($_.Exception.Message). The collected files are still available, unzipped, at: $OutRoot"
+}
 Write-Host ""
 Write-Host "Attach this ZIP to your Bluebeam Support case."
 Write-Host "If Support wants more detail, enable 'Extended Debugging' in Revu (Preferences → Admin), reproduce, and run again."

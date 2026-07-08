@@ -120,6 +120,10 @@ function Invoke-WingetInstall {
         Write-Log -Level 'Information' -Message "Winget install attempt $($i): $Id"   # ← fixed
         & $winget install --id $Id --accept-package-agreements --accept-source-agreements --silent --disable-interactivity | Out-Null
         if ($LASTEXITCODE -eq 0) { return $true }
+        if ($LASTEXITCODE -in 3010, 1641) {
+            $script:AnyRebootNeeded = $true
+            return $true
+        }
         Start-Sleep -Seconds ([math]::Pow(2, $i))
     }
     return $false
@@ -141,6 +145,7 @@ function Invoke-FallbackScript {
     try {
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
         & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Path -ErrorAction Stop
+        if ($LASTEXITCODE -in 3010, 1641) { $script:AnyRebootNeeded = $true }
     } finally {
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy $oldPol -Force
     }
@@ -181,12 +186,25 @@ function Install-DellCommandUpdate {
             Write-Log -Level 'Information' -Message 'DCU CLI completed successfully.'
             return @{ Status = 'Installed/Updated'; Version = 'via-CLI' }
         }
+        # 3010/1641 are success-with-reboot-required, not failures - this
+        # used to fall through to "No DCU CLI or MSI found" on a run that
+        # actually succeeded.
+        if ($LASTEXITCODE -in 3010, 1641) {
+            Write-Log -Level 'Information' -Message 'DCU CLI completed successfully (reboot required).'
+            $script:AnyRebootNeeded = $true
+            return @{ Status = 'Installed/Updated'; Version = 'via-CLI' }
+        }
     }
     $msi = Get-ChildItem -Path $FolderPath -Filter '*.msi' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($msi) {
         & msiexec.exe /i "`"$($msi.FullName)`"" /quiet /norestart
         if ($LASTEXITCODE -eq 0) {
             Write-Log -Level 'Information' -Message 'DCU MSI installed successfully.'
+            return @{ Status = 'Installed'; Version = 'via-MSI' }
+        }
+        if ($LASTEXITCODE -in 3010, 1641) {
+            Write-Log -Level 'Information' -Message 'DCU MSI installed successfully (reboot required).'
+            $script:AnyRebootNeeded = $true
             return @{ Status = 'Installed'; Version = 'via-MSI' }
         }
     }
@@ -206,6 +224,7 @@ try {
 
     $summary     = @{}
     $needsReboot = $false
+    $script:AnyRebootNeeded = $false
     $total       = $Products.Count
     $index       = 0
 
@@ -275,7 +294,14 @@ try {
     }
 
     #----------- Finalise -----------#
-    if (Select-String -Path $LogPath -Pattern '3010|1641' -Quiet) { $needsReboot = $true }
+    # Derived from each install path's actual recorded exit code
+    # ($script:AnyRebootNeeded, set in Invoke-WingetInstall/
+    # Invoke-FallbackScript/Install-DellCommandUpdate) instead of a raw
+    # substring search over the whole transcript - that used to match on
+    # "3010"/"1641" appearing anywhere at all (a URL, a version string, a
+    # timestamp), with no structural link to which product actually needed
+    # a reboot.
+    if ($script:AnyRebootNeeded) { $needsReboot = $true }
     $summary['NeedsReboot'] = $needsReboot
     $summary['Completed']   = (Get-Date).ToString('o')
 

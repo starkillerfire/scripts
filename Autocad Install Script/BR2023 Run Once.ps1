@@ -39,10 +39,26 @@ param(
 if ($PSBoundParameters.ContainsKey('ComputerName')) {
     $remoteParams = $PSBoundParameters.Clone()
     [void]$remoteParams.Remove('ComputerName')
-    # Use a scriptblock so named parameters splat correctly on the remote machine
+
+    # $PSCommandPath is this technician's own local path (often under their
+    # OneDrive profile) - it won't exist at that path on the remote target,
+    # so "& $using:PSCommandPath" always failed there. Ship the script's own
+    # content over instead and run it from a temp file on the remote side.
+    # Also run synchronously (no -AsJob) and surface errors, so a remote
+    # failure is visible here instead of vanishing into an unwatched job.
+    $scriptText = Get-Content -LiteralPath $PSCommandPath -Raw
+
     Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-        & $using:PSCommandPath @using:remoteParams
-    } -AsJob
+        param($ScriptText, $RemoteParams)
+        $tempScript = Join-Path $env:TEMP ("BR2023RunOnce_{0}.ps1" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $tempScript -Value $ScriptText -Encoding UTF8
+        try {
+            & $tempScript @RemoteParams
+        } finally {
+            Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+        }
+    } -ArgumentList $scriptText, $remoteParams -ErrorAction Continue
+
     return
 }
 
@@ -156,7 +172,8 @@ function Invoke-BrConfig {
     [CmdletBinding()]
     param(
         [string]$LocalDst,[string]$Language='en-US',
-        [scriptblock]$ProgressAction,[scriptblock]$LogAction
+        [scriptblock]$ProgressAction,[scriptblock]$LogAction,
+        [int]$TimeoutSeconds = 600
     )
     & $LogAction 'Config-Start'
     & $ProgressAction 'Configuring Civil 3D' 60
@@ -181,7 +198,16 @@ function Invoke-BrConfig {
     foreach ($scr in 'BR_End','BR_C3D_config') {
         $acadProc = Start-Process $exe -ArgumentList '/product','C3D','/language',$Language,
                                                      '/b',"$LocalDst\Brutil\$scr" `
-                              -Wait -NoNewWindow -PassThru
+                              -NoNewWindow -PassThru
+        # No -Wait here - a modal dialog (license prompt, drawing-recovery
+        # prompt, missing/corrupt Brutil script) would otherwise block acad
+        # from ever running the /b script, and -Wait would hang forever with
+        # no diagnostic. WaitForExit(ms) lets us detect that and bail out.
+        $exited = $acadProc.WaitForExit($TimeoutSeconds * 1000)
+        if (-not $exited) {
+            try { $acadProc.Kill() } catch {}
+            throw "acad.exe timed out after $TimeoutSeconds second(s) running '$scr' - likely blocked on a modal dialog (license prompt, drawing recovery, or a missing/corrupt Brutil script)"
+        }
         if ($acadProc.ExitCode -ne 0) { throw "acad exited $($acadProc.ExitCode)" }
     }
 

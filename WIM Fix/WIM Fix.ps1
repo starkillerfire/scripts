@@ -56,7 +56,12 @@ try {
     if ($role -in 4, 5) {
         Write-Log "Domain controller detected. Exiting for safety." "WARN"
         Stop-Transcript
-        exit
+        # Explicit 0: a bare `exit` here would return whatever $LASTEXITCODE
+        # happened to hold from before this script started (native exit
+        # codes persist across invocations in the same console), which
+        # could show a stale nonzero/zero code unrelated to this
+        # intentional, successful skip.
+        exit 0
     }
 } catch {
     Write-Log "Unable to determine domain role." "WARN"

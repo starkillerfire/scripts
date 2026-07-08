@@ -250,22 +250,22 @@ function Invoke-RemoveUPPrinterShare {
 function Get-AllUPPrinters {
   $all=@(); $r=$null
   $r = Invoke-UP { Get-UPPrinter }
-  if ($r -and $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+  if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
   while ($r -and $r.ContinuationToken) {
     $tok = $r.ContinuationToken
     $r = Invoke-UP { Get-UPPrinter -ContinuationToken $tok }
-    if ($r -and $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+    if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
   }
   $all
 }
 function Get-AllUPPrinterShares {
   $all=@(); $r=$null
   $r = Invoke-UP { Get-UPPrinterShare }
-  if ($r -and $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+  if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
   while ($r -and $r.ContinuationToken) {
     $tok = $r.ContinuationToken
     $r = Invoke-UP { Get-UPPrinterShare -ContinuationToken $tok }
-    if ($r -and $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+    if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
   }
   $all
 }
@@ -399,8 +399,12 @@ $errUnshares = ($Log | Where-Object { $_.Action -eq 'Unshare'       -and $_.Stat
 Write-Host ("Summary: Printers OK={0}, Errors={1}; Unshares OK={2}, Errors={3}; NotFound={4}" -f $okDeletes,$errDeletes,$okUnshares,$errUnshares,$notFound.Count)
 
 # ---- Save CSV log ----
+# $PSScriptRoot instead of $PWD - this is typically run from an elevated
+# console that often defaults to C:\Windows\System32, so a $PWD-relative
+# path could land the audit log somewhere a technician wouldn't think to
+# look for it.
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$path  = Join-Path $PWD ("UP-Removal-Log-{0}.csv" -f $stamp)
+$path  = Join-Path $PSScriptRoot ("UP-Removal-Log-{0}.csv" -f $stamp)
 $Log | Export-Csv -Path $path -NoTypeInformation -Encoding UTF8
 Write-Host "Log written to $path"
 

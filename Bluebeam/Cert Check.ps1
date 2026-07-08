@@ -156,10 +156,14 @@ if (-not $NoPause) {
 # Export recent Event ID 11 entries
 try {
   $since = (Get-Date).AddMinutes(-$MinutesToCapture).ToString("o")
+  # position() <= $MaxEvents actually applies the -MaxEvents limit - this
+  # parameter used to be declared/validated/documented but never referenced
+  # anywhere in the actual wevtutil query, so passing -MaxEvents had no
+  # effect at all.
   $query = @"
 <QueryList>
   <Query Id="0" Path="$capiChannel">
-    <Select>*[System[(EventID=11) and TimeCreated[@SystemTime >= '$since']]]</Select>
+    <Select>*[System[(EventID=11) and TimeCreated[@SystemTime >= '$since']]][position() &lt;= $MaxEvents]</Select>
   </Query>
 </QueryList>
 "@

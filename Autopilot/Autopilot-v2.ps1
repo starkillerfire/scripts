@@ -517,7 +517,23 @@ END {
                             }
                         }
                         catch {
-                            $deleteConfirmed = $true
+                            # Only a real 404 actually confirms the device is
+                            # gone. Treating ANY exception here as "deleted"
+                            # meant a transient network blip, throttling
+                            # (429), or an expired token would look
+                            # identical to a genuine deletion - masking a
+                            # failed/incomplete delete as success and
+                            # risking a duplicate-serial conflict on upload.
+                            $statusCode = $null
+                            if ($_.Exception.Response) {
+                                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+                            }
+                            if ($statusCode -eq 404) {
+                                $deleteConfirmed = $true
+                            } elseif ($deleteWait % 60 -eq 0) {
+                                Write-Host ""
+                                Write-Host "  Still waiting... ($deleteWait`s elapsed; last check error: $($_.Exception.Message))" -ForegroundColor Gray -NoNewline
+                            }
                         }
                     }
 

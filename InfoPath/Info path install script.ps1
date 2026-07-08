@@ -23,6 +23,12 @@ param (
     [switch]$Force
 )
 
+# Without this, non-terminating cmdlet errors (a failed Add-Content,
+# Get-ChildItem, etc.) wouldn't be caught by the try/catch blocks below -
+# only explicit throws would, letting a real failure pass through silently
+# unlogged instead of being caught and surfaced.
+$ErrorActionPreference = 'Stop'
+
 # ─── Constants / pre-flight ────────────────────────────────────────────────
 try { [Net.ServicePointManager]::SecurityProtocol = 3072 -bor 12288 }
 catch { [Net.ServicePointManager]::SecurityProtocol = 3072 }

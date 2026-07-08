@@ -633,8 +633,13 @@ function Disable-StigOptionalFeature {
     foreach ($feature in $FeatureName) {
         $state = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction SilentlyContinue
         if ($state -and $state.State -eq 'Enabled') {
-            Disable-WindowsOptionalFeature -Online -FeatureName $feature -NoRestart -ErrorAction Stop | Out-Null
-            $script:RebootRequired = $true
+            try {
+                Disable-WindowsOptionalFeature -Online -FeatureName $feature -NoRestart -ErrorAction Stop | Out-Null
+                $script:RebootRequired = $true
+            }
+            catch {
+                Add-OutstandingItem "Optional feature $feature could not be disabled automatically: $($_.Exception.Message)"
+            }
         }
     }
 }
@@ -824,11 +829,24 @@ function Invoke-BitLockerRemediation {
         if ($volume.ProtectionStatus -eq 'On') {
             if ($volume.VolumeType -eq 'OperatingSystem') {
                 $hasTpmPin = $false
+                $tpmOnlyProtectors = New-Object System.Collections.Generic.List[object]
                 foreach ($kp in $volume.KeyProtector) {
                     if ($kp.KeyProtectorType -match 'TpmPin') { $hasTpmPin = $true }
+                    elseif ($kp.KeyProtectorType -eq 'Tpm') { $tpmOnlyProtectors.Add($kp) }
                 }
                 if (-not $hasTpmPin) {
                     Add-BitLockerKeyProtector -MountPoint $mount -Pin $Pin -TpmAndPinProtector -ErrorAction Stop | Out-Null
+                    # A TPM-only protector left in place would let Windows boot
+                    # without the PIN via that older protector, silently
+                    # defeating the TPM+PIN requirement this just added - it
+                    # has to be removed for the PIN to actually be required.
+                    foreach ($old in $tpmOnlyProtectors) {
+                        try {
+                            Remove-BitLockerKeyProtector -MountPoint $mount -KeyProtectorId $old.KeyProtectorId -ErrorAction Stop
+                        } catch {
+                            Add-OutstandingItem "Added TPM+PIN protector on $mount, but could not remove the pre-existing TPM-only protector ($($old.KeyProtectorId)): $($_.Exception.Message). Boot may still be possible without a PIN via the old protector until it's removed manually."
+                        }
+                    }
                 }
             }
             continue
@@ -982,7 +1000,7 @@ function Invoke-StigSystemReadiness {
     $mdmEnrollment = 'Not detected'
     try {
         $enrollments = Get-ChildItem -Path 'HKLM:\SOFTWARE\Microsoft\Enrollments' -ErrorAction SilentlyContinue |
-            Where-Object { (Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue).EnrollmentType -ne $null }
+            Where-Object { $null -ne (Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue).EnrollmentType }
         if ($enrollments) { $mdmEnrollment = 'Detected' }
     } catch { $mdmEnrollment = 'Unknown' }
 
@@ -1147,6 +1165,29 @@ function Export-StigCertificateReport {
     Write-Host "Certificate report: $path" -ForegroundColor Green
 }
 
+# WN11-00-000140 is about restricting *remote administration* inbound
+# access (WinRM/RDP/remote-management tooling) to authorized hosts - not
+# every inbound allow rule on the box. Restricting every enabled inbound
+# Allow rule (file/printer sharing, network discovery, Delivery
+# Optimization, etc.) to the management-host list would break ordinary LAN
+# functionality far outside this STIG item's intended scope, so both the
+# preview and the actual apply step below are scoped to these known
+# remote-administration rule groups instead of "every inbound allow rule."
+$script:StigRemoteManagementFirewallGroups = @(
+    'Windows Remote Management',
+    'Remote Desktop',
+    'Remote Event Log Management',
+    'Remote Scheduled Tasks Management',
+    'Remote Service Management',
+    'Remote Volume Management',
+    'Windows Management Instrumentation (WMI)'
+)
+
+function Get-StigRemoteManagementFirewallRules {
+    Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayGroup -in $script:StigRemoteManagementFirewallGroups -or $_.Group -in $script:StigRemoteManagementFirewallGroups }
+}
+
 function Export-FirewallScopePreview {
     param([Parameter(Mandatory)][string]$OutputRoot)
 
@@ -1154,7 +1195,7 @@ function Export-FirewallScopePreview {
     $path = Join-Path $OutputRoot "Win11_STIG_FirewallScopePreview_$stamp.csv"
     $proposed = if ($AuthorizedRemoteManagementHosts) { ($AuthorizedRemoteManagementHosts -join ',') } else { '<none supplied>' }
     $rows = New-Object System.Collections.Generic.List[object]
-    foreach ($rule in @(Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -ErrorAction SilentlyContinue)) {
+    foreach ($rule in @(Get-StigRemoteManagementFirewallRules)) {
         $currentAddress = '<unknown>'
         try {
             $addr = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
@@ -1973,14 +2014,25 @@ function Invoke-PowerStigBaseline {
     if ($SkipPowerSTIG) { return }
     Write-Section 'Applying PowerSTIG DSC baseline when available'
 
-    # DSC push mode requires WinRM - enable it if not already running
+    # DSC push mode requires WinRM - enable it if not already running. The
+    # firewall rule this opens (port 5985, all profiles) is scoped to what
+    # this run itself creates and is removed again in the finally block
+    # below once the DSC push completes, so a hardening script doesn't
+    # leave a new network-reachable listener enabled indefinitely as a side
+    # effect. (WinRM itself is left enabled, since disabling it isn't a
+    # clean inverse of Enable-PSRemoting and other things on the machine may
+    # legitimately depend on it - this is reported via Add-OutstandingItem
+    # instead so it's visible to the operator rather than silent.)
+    $script:CreatedWsManFirewallRule = $false
     try {
         Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop | Out-Null
         if (-not (Get-NetFirewallRule -Name 'Allow-WSMan-AllProfiles' -ErrorAction SilentlyContinue)) {
             New-NetFirewallRule -Name 'Allow-WSMan-AllProfiles' -DisplayName 'Allow WS-Man Inbound (All Profiles)' `
                 -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any | Out-Null
+            $script:CreatedWsManFirewallRule = $true
         }
         Test-WSMan -ComputerName localhost -ErrorAction Stop | Out-Null
+        Add-OutstandingItem 'WinRM was enabled to support local PowerSTIG DSC push mode and is left enabled afterward (not part of this STIG baseline) - review whether it should be disabled for this machine once remediation is confirmed.'
     }
     catch { Add-OutstandingItem "WinRM setup for DSC push failed: $($_.Exception.Message)" }
 
@@ -2056,10 +2108,21 @@ function Invoke-PowerStigBaseline {
     $mofPath = Join-Path $env:ProgramData 'PowerSTIG\Mof'
     New-StigDirectory -Path $lcmPath
     New-StigDirectory -Path $mofPath
-    LCM_PushConfig -OutputPath $lcmPath
-    Set-DscLocalConfigurationManager -Path $lcmPath -Verbose -Force | Out-Null
-    Win11_STIG_Baseline -OrgSettings $orgDefault -StigVersion $stigVersion -OutputPath $mofPath
-    Start-DscConfiguration -Path $mofPath -Wait -Verbose -Force
+    try {
+        LCM_PushConfig -OutputPath $lcmPath
+        Set-DscLocalConfigurationManager -Path $lcmPath -Verbose -Force | Out-Null
+        Win11_STIG_Baseline -OrgSettings $orgDefault -StigVersion $stigVersion -OutputPath $mofPath
+        Start-DscConfiguration -Path $mofPath -Wait -Verbose -Force
+    }
+    finally {
+        # Remove the firewall rule this function opened for WinRM, whether
+        # the DSC push above succeeded or failed - it was only needed for
+        # this local push, not as a lasting change.
+        if ($script:CreatedWsManFirewallRule) {
+            try { Remove-NetFirewallRule -Name 'Allow-WSMan-AllProfiles' -ErrorAction Stop }
+            catch { Add-OutstandingItem "Could not remove the temporary WS-Man firewall rule 'Allow-WSMan-AllProfiles' created for DSC push: $($_.Exception.Message). Remove it manually if it's no longer needed." }
+        }
+    }
 }
 
 function Invoke-LocalSecurityPolicyRemediation {
@@ -2406,11 +2469,11 @@ function Import-AssessmentResultTargeting {
 
     $targetSet = New-RuleIdHashSet
     foreach ($rule in $script:RuleInventory) {
-        $matches = $false
+        $ruleMatches = $false
         foreach ($id in @($rule.Version, $rule.GroupId, $rule.RuleXmlId) + @($rule.AutomatedDefIds)) {
-            if ($id -and $failedIds.Contains($id)) { $matches = $true }
+            if ($id -and $failedIds.Contains($id)) { $ruleMatches = $true }
         }
-        if ($matches) {
+        if ($ruleMatches) {
             foreach ($id in @($rule.Version, $rule.GroupId, $rule.RuleXmlId) + @($rule.AutomatedDefIds)) { Add-RuleIdToSet -Set $targetSet -Value $id }
         }
     }
@@ -2798,6 +2861,25 @@ try {
     Write-Host "Transcript: $($script:TranscriptPath)" -ForegroundColor Green
     Write-Host "Backup path: $($script:BackupPath)" -ForegroundColor Green
     Write-Host "Operator summary: $($script:OperatorSummaryPath)" -ForegroundColor Green
+}
+catch {
+    # Without this, any single unhandled error anywhere above (e.g. a
+    # secedit/DISM failure that isn't individually caught) aborts the whole
+    # run with nothing but a raw stack trace - no outstanding-items list, no
+    # coverage report, no operator summary, even though a backup/rollback
+    # package may already exist from earlier in the run. Surface the error
+    # clearly and still attempt to produce whatever reporting is possible
+    # before re-throwing, so the operator isn't left with nothing.
+    Write-Section 'STIG remediation aborted due to an unhandled error'
+    Add-OutstandingItem "FATAL: Remediation aborted with an unhandled error: $($_.Exception.Message)"
+    Write-Host "FATAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor Red
+
+    try { Invoke-StigValidationSummary } catch {}
+    try { Write-StigOperatorSummary -OutputRoot $ReportRoot } catch {}
+    try { Invoke-EndOfRunReportActions } catch {}
+
+    throw
 }
 finally {
     if ($script:TranscriptActive) {

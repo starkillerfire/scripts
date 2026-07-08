@@ -50,6 +50,13 @@ foreach ($row in (Import-Csv -Path $InputCsv)) {
         $uncOut    = "\\$computer\C$\Temp\BitLockerOutput_$computer.csv"
         $psCommand = "Get-BitLockerVolume -MountPoint 'C:' | Select-Object ProtectionStatus,EncryptionPercentage | Export-Csv -Path '$remoteOut' -NoTypeInformation -Force"
 
+        # Clear any leftover file from a previous run against this same
+        # computer first - otherwise, if PsExec fails to execute the remote
+        # command this run (bad creds, firewall, remote-exec blocked), a
+        # stale file from before would still pass the Test-Path check below
+        # and get reported as current data.
+        Remove-Item -Path $uncOut -Force -ErrorAction SilentlyContinue
+
         & $PsExecPath "\\$computer" -s -h -nobanner cmd.exe /c "if not exist C:\Temp mkdir C:\Temp" 2>&1 | Out-Null
         & $PsExecPath "\\$computer" -s -h -nobanner powershell.exe -ExecutionPolicy Bypass -Command $psCommand 2>&1 | Out-Null
 

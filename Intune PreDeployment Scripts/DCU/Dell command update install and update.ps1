@@ -17,7 +17,8 @@ param(
     [ValidateRange(0,10000)][int]$BitsThrottleKBps = 0,
     [ValidateSet('All','BIOSOnly','DriversOnly')][string]$Mode = 'All',
     [switch]$NoReboot,[switch]$DisableBIOSUpdates,[switch]$SkipBiosOnBattery,
-    [switch]$StageOnly,[int]$WaitForAcMinutes=15,[int]$MinBatteryPercentForBios=50,
+    [switch]$StageOnly, # currently unused/reserved - nothing in this script branches on it yet
+    [int]$WaitForAcMinutes=15,[int]$MinBatteryPercentForBios=50,
     [switch]$Quiet,[switch]$DebugLog,
 
     # Runtime
@@ -366,13 +367,18 @@ try {
 }
 catch {
     Write-Log ($_ | Out-String) 'ERROR'
-    # Retry once next boot if we failed before updates were applied
+    # Retry once next boot if we failed before updates were applied.
+    # -StageOnly isn't passed here: it's declared as a parameter but never
+    # actually referenced anywhere in this script, so passing it would just
+    # imply a "staged" retry that doesn't exist - this retry re-runs the
+    # full script identically to a normal invocation.
     Set-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce' `
-                     'DCU_Retry' "\"$PSCommandPath\" -StageOnly"
+                     'DCU_Retry' "\"$PSCommandPath\""
     exit 500
 }
 finally {
     Stop-Transcript -EA 0 | Out-Null
-    Compress-Archive -Path $Transcript -DestinationPath "$Transcript.gz" -Force
+    # Compress-Archive produces a real ZIP file, not gzip - name it accordingly.
+    Compress-Archive -Path $Transcript -DestinationPath "$Transcript.zip" -Force
     $mutex.ReleaseMutex()
 }

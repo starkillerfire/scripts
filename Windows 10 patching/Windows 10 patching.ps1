@@ -88,7 +88,27 @@ $Targets = Get-Targets -Inline $ComputerName -CsvPath $ComputerListCsv -OUPath $
 if (-not $Targets) { Write-Host "Nothing to do."; return }
 
 # ----- ring rollout (chunk by parent OU) --------------------------------------
-$SortedTargets = $Targets | Sort-Object { ([ADSI]"LDAP://$_").Parent }, $_
+# A bare computer name is not a valid ADSI path - "LDAP://PC123" isn't
+# resolvable and throws, so this has to go through Get-ADComputer first to
+# get an actual distinguishedName before binding. Falls back to leaving the
+# targets in their original order (no OU grouping) if the ActiveDirectory
+# module isn't available or a given name doesn't resolve, rather than
+# failing the whole ring rollout over one bad/non-domain name.
+function Get-PatchTargetOuParent {
+    param([string]$ComputerName)
+    try {
+        $dn = (Get-ADComputer -Identity $ComputerName -ErrorAction Stop).DistinguishedName
+        return ([ADSI]"LDAP://$dn").Parent
+    } catch {
+        return ''
+    }
+}
+if (Get-Command Get-ADComputer -ErrorAction SilentlyContinue) {
+    $SortedTargets = $Targets | Sort-Object { Get-PatchTargetOuParent -ComputerName $_ }, $_
+} else {
+    Write-Warning 'ActiveDirectory module not available - skipping OU-based ring ordering.'
+    $SortedTargets = $Targets
+}
 $TargetChunks  = for ($i = 0; $i -lt $SortedTargets.Count; $i += $RingChunkSize) {
     ,($SortedTargets[$i..([math]::Min($i + $RingChunkSize - 1,
                                       $SortedTargets.Count - 1))])
@@ -247,13 +267,18 @@ foreach ($ring in $TargetChunks) {
     for ($try = 1; $try -le $MaxRetry -and $remaining.Count; $try++) {
         Write-Host "Ring size $($ring.Count) - Attempt $try on $($remaining.Count) node(s)…"
 
-        $cim = New-CimSession -ComputerName $remaining -Credential $AdminCred -ErrorAction SilentlyContinue
-        $cimFailed = $remaining | Where-Object { $_ -notin ($cim | Select-Object -ExpandProperty ComputerName) }
-        foreach ($c in $cimFailed) {
-            Write-Warning "Ring attempt $try : could not establish a CIM session to $c"
+        # Invoke-Command has no -CimSession parameter at all (CIM sessions
+        # are for Get-CimInstance/Invoke-CimMethod, not PowerShell
+        # remoting) - this used to throw a parameter-binding error on every
+        # single attempt, so the remote patch step never actually ran on
+        # any node. Real PSSessions are what Invoke-Command needs here.
+        $session = New-PSSession -ComputerName $remaining -Credential $AdminCred -ErrorAction SilentlyContinue
+        $sessionFailed = $remaining | Where-Object { $_ -notin ($session | Select-Object -ExpandProperty ComputerName) }
+        foreach ($c in $sessionFailed) {
+            Write-Warning "Ring attempt $try : could not establish a PS session to $c"
         }
 
-        $job = Invoke-Command -CimSession $cim -ScriptBlock $RemotePayload -ArgumentList `
+        $job = Invoke-Command -Session $session -ScriptBlock $RemotePayload -ArgumentList `
                $CentralLogShare,$PSWUVersion,$NoDrivers,$NoFeatureUpgrades,`
                $OffLineCatchupHours,$OffLineCatchupSpan -ErrorAction SilentlyContinue
 
@@ -263,7 +288,7 @@ foreach ($ring in $TargetChunks) {
         # separate error bucket to check.
         $completedComputers = $job | Select-Object -ExpandProperty PSComputerName -Unique
 
-        foreach ($s in $cim) {
+        foreach ($s in $session) {
             $state = if ($s.ComputerName -in $completedComputers) { 'Completed' } else { 'Failed' }
 
             $JobsSummary.Add([pscustomobject]@{
@@ -272,7 +297,7 @@ foreach ($ring in $TargetChunks) {
                 Attempt      = $try
             })
         }
-        foreach ($c in $cimFailed) {
+        foreach ($c in $sessionFailed) {
             $JobsSummary.Add([pscustomobject]@{
                 ComputerName = $c
                 State        = 'Failed'
@@ -284,7 +309,7 @@ foreach ($ring in $TargetChunks) {
                      Where-Object { $_.State -ne 'Completed' -and $_.Attempt -eq $try } |
                      Select-Object -ExpandProperty ComputerName -Unique
 
-        Remove-CimSession $cim
+        Remove-PSSession $session
     }
 }
 

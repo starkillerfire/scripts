@@ -140,11 +140,19 @@ function Install-ChromeRemote {
         if ($rc -in @(0, 3010, 1641)) {
             Start-Sleep -Seconds 15
             $newVersion = Get-ChromeVersion -ComputerName $ComputerName
-            if ($newVersion -and $newVersion -ne $currentVersion) {
+            # Get-ChromeVersion depends on the Remote Registry service, which
+            # is disabled by default on most Win10/11 workstations - $null
+            # there almost always means "couldn't check", not "install
+            # failed". Only a version that came back AND still matches the
+            # old one is a real signal something's wrong; a $null result
+            # shouldn't override a good msiexec exit code.
+            if ($newVersion -and $newVersion -eq $currentVersion) {
+                Write-Log "[$ComputerName] WARNING - msiexec reported success but installed version is unchanged (exit $rc, still: $currentVersion)."
+                $script:FailedComputers.Add($ComputerName)
+            } elseif ($newVersion) {
                 Write-Log "[$ComputerName] SUCCESS - Chrome updated to $newVersion (exit $rc)."
             } else {
-                Write-Log "[$ComputerName] WARNING - version unchanged after install (exit $rc, was: $currentVersion)."
-                $script:FailedComputers.Add($ComputerName)
+                Write-Log "[$ComputerName] SUCCESS (exit $rc) - version could not be confirmed via remote registry (Remote Registry service may be disabled on this machine)."
             }
             if ($rc -ne 0) { Write-Log "[$ComputerName] NOTE: Reboot pending to complete update." }
         } else {

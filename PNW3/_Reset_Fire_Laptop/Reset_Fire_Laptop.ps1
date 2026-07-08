@@ -147,6 +147,9 @@ function Invoke-ForEachUserHive {
                     [gc]::Collect()
                     [gc]::WaitForPendingFinalizers()
                     reg unload "HKU\$sid" 2>$null | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning "  Could not unload hive for $(Split-Path $path -Leaf) (HKU\$sid) - it may still be mounted and could affect this user's next logon."
+                    }
                 }
             }
         }
@@ -485,8 +488,10 @@ Function Remove-OutlookProfile {
     $pstFiles = Get-ChildItem "$UsersBase\*\Documents", "$UsersBase\*\Downloads", "$UsersBase\*\Desktop" `
         -Filter '*.pst' -Recurse -Force -ErrorAction SilentlyContinue
 
+    $pstFilesToDelete = $pstFiles
     if ($BackupPst -and $pstFiles) {
         if (-not (Test-Path $PstBackupPath)) { New-Item -Path $PstBackupPath -ItemType Directory -Force | Out-Null }
+        $failedBackups = New-Object System.Collections.Generic.List[string]
         foreach ($pst in $pstFiles) {
             $userName = ($pst.FullName -split '\\')[$UsersBase.Split('\\').Count]
             $destName = "$userName-$($pst.Name)"
@@ -494,12 +499,17 @@ Function Remove-OutlookProfile {
                 Copy-Item -Path $pst.FullName -Destination (Join-Path $PstBackupPath $destName) -Force -ErrorAction Stop
                 Write-Host "  Backed up: $($pst.FullName) -> $(Join-Path $PstBackupPath $destName)"
             } catch {
-                Write-Host "  WARNING: Could not back up $($pst.FullName): $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "  WARNING: Could not back up $($pst.FullName): $($_.Exception.Message) - this file will NOT be deleted." -ForegroundColor Yellow
+                $failedBackups.Add($pst.FullName)
             }
         }
+        # A failed backup must not still result in deleting the only copy
+        # of what may be an intentionally archived mailbox - only PSTs that
+        # were actually backed up successfully get removed below.
+        $pstFilesToDelete = $pstFiles | Where-Object { $_.FullName -notin $failedBackups }
     }
 
-    $pstFiles | Remove-Item -Force -ErrorAction SilentlyContinue
+    $pstFilesToDelete | Remove-Item -Force -ErrorAction SilentlyContinue
 
     Write-Host -ForegroundColor Yellow "Outlook Profile Removal - COMPLETE`r`n"
 }
@@ -524,6 +534,21 @@ Function Clear-PinnedItems {
     # Release the COM object in finally to avoid handle leaks.
     $shell = New-Object -ComObject Shell.Application
     try {
+        if ($WhatIfPreference) {
+            # InvokeVerb is a raw COM call and does NOT honor
+            # $WhatIfPreference the way native cmdlets do - without this
+            # explicit check, -WhatIf would still really unpin every Quick
+            # Access item despite the "no changes will be made" banner. This
+            # is a single preview pass rather than reusing the retry loop
+            # below (which exists to handle the COM collection going stale
+            # after a REAL removal - not applicable when nothing is removed).
+            foreach ($item in $shell.Namespace("shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}").Items()) {
+                if (-not $item.IsFolder) { continue }
+                Write-Host "  What if: would unpin '$($item.Name)' from Quick access" -ForegroundColor DarkYellow
+            }
+            return
+        }
+
         $maxIterations = 50
         $iteration = 0
         $found = $true

@@ -115,7 +115,10 @@ function Invoke-EdgeDownload {
 ############################# 5. MAIN #######################################
 try {
     # 5.1 Disk guard
-    $drive = Get-PSDrive -Name (Split-Path $WorkingRoot -Qualifier)
+    # Split-Path -Qualifier returns "C:" (with the colon); Get-PSDrive -Name
+    # wants just "C" and throws DriveNotFoundException otherwise - this
+    # crashed on the very first line of every single run.
+    $drive = Get-PSDrive -Name (Split-Path $WorkingRoot -Qualifier).TrimEnd(':')
     if ($drive.Free -lt 1GB) { Write-Log 'Insufficient disk space (<1 GB).' $EvtHashFail 'Error'; exit [DeployExit]::OtherError }
 
     # 5.2 Paths
@@ -159,12 +162,34 @@ try {
         }
     }
 
-    $Rel = $Feed.products | Where-Object { $_.name -eq 'Microsoft Edge' } | Select-Object -ExpandProperty releases |
-           Where-Object { $_.channel -eq $Channel.ToLower() } | Sort-Object build -Descending | Select-Object -First 1
-    $Latest    = [version]$Rel.build
-    $Pkg       = $Rel.artifacts | Where-Object { $_.platform -eq $Arch -and $_.type -eq 'msi' } | Select-Object -First 1
-    $Url       = $Pkg.location
-    $Sha       = $Pkg.hashSHA256
+    # The real edgeupdates.microsoft.com response is a flat array of
+    # { Product, Releases: [ { Platform, Architecture, ProductVersion,
+    # Artifacts: [ { ArtifactName, Location, Hash } ] } ] } - not the
+    # {products:[{name,releases:[{channel,build,artifacts:[{platform,type,
+    # location,hashSHA256}]}]}]} shape this used to assume, which meant
+    # $Rel was always $null and the next line threw on every run.
+    $channelObj = $Feed | Where-Object { $_.Product -eq $Channel }
+    if (-not $channelObj) {
+        Write-Log "Channel '$Channel' not found in Edge Updates API response." $EvtDLFail 'Error'
+        $State.Retry++; $State.NextRetry = (Get-Date).AddMinutes([math]::Pow(2,$State.Retry)*30); Save-State 'Error'
+        exit [DeployExit]::DownloadFail
+    }
+    $Rel = $channelObj.Releases | Where-Object { $_.Platform -eq 'Windows' -and $_.Architecture -eq $Arch } |
+           Sort-Object { [version]$_.ProductVersion } -Descending | Select-Object -First 1
+    if (-not $Rel) {
+        Write-Log "No Edge release found for Platform=Windows/Architecture=$Arch." $EvtDLFail 'Error'
+        $State.Retry++; $State.NextRetry = (Get-Date).AddMinutes([math]::Pow(2,$State.Retry)*30); Save-State 'Error'
+        exit [DeployExit]::DownloadFail
+    }
+    $Pkg = $Rel.Artifacts | Where-Object { $_.Location -match '\.msi$' } | Select-Object -First 1
+    if (-not $Pkg) {
+        Write-Log 'No MSI artifact found for the latest Edge release.' $EvtDLFail 'Error'
+        $State.Retry++; $State.NextRetry = (Get-Date).AddMinutes([math]::Pow(2,$State.Retry)*30); Save-State 'Error'
+        exit [DeployExit]::DownloadFail
+    }
+    $Latest    = [version]$Rel.ProductVersion
+    $Url       = $Pkg.Location
+    $Sha       = $Pkg.Hash
     $Installer = Join-Path $DlDir ([IO.Path]::GetFileName($Url))
 
     # 5.6 Current install
@@ -179,7 +204,7 @@ try {
     }
     if ($Current -ge $Latest) {
         Write-Log 'Edge already current.' $EvtNoUpdate
-        $State.Version="$Current";$State.Result='AlreadyCurrent';$State.Hash=$Sha;Save-State'Done'
+        $State.Version="$Current";$State.Result='AlreadyCurrent';$State.Hash=$Sha;Save-State 'Done'
         Write-Output ($State | ConvertTo-Json -Compress)
         exit [DeployExit]::Success
     }
@@ -195,7 +220,7 @@ try {
     try { Invoke-EdgeDownload -Url $Url -Dest $Installer -Sha256 $Sha }
     catch {
         Write-Log 'Permanent download failure.' $EvtDLFail 'Error'
-        $State.Retry++;$State.NextRetry=(Get-Date).AddMinutes([math]::Pow(2,$State.Retry)*30);Save-State'Error'
+        $State.Retry++;$State.NextRetry=(Get-Date).AddMinutes([math]::Pow(2,$State.Retry)*30);Save-State 'Error'
         exit [DeployExit]::DownloadFail
     }
 
@@ -218,7 +243,7 @@ try {
         1641 { $Res='InstallerReboot';$Exit=[DeployExit]::Reboot }
         default { $Res="Error_$($p.ExitCode)";$Exit=[DeployExit]::OtherError }
     }
-    $State.Version="$Latest";$State.Result=$Res;$State.Hash=$Sha;Save-State'Done'
+    $State.Version="$Latest";$State.Result=$Res;$State.Hash=$Sha;Save-State 'Done'
     Write-Log "Installer exited with code $($p.ExitCode) ($Res)" $EvtSuccess
 
     # 5.11 Cleanup

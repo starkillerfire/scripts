@@ -69,7 +69,13 @@ function Get-FixedBuild {
     return $PinnedMinBuild
 }
 $MinBuild  = Get-FixedBuild
-$CurBuild  = [version](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+# CurrentBuildNumber alone (e.g. "19045") has no dot and isn't a valid
+# [version] on its own - casting it directly throws every time, which the
+# top-level trap swallows into a silent "exit 1" before any mitigation
+# logic runs. UBR (Update Build Revision) supplies the part after the dot,
+# matching the "19045.4651" shape $PinnedMinBuild is already in.
+$cvKey = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$CurBuild = [version]"$($cvKey.CurrentBuildNumber).$($cvKey.UBR)"
 if ($CurBuild -lt $MinBuild) { throw "OS build $CurBuild < $MinBuild - install latest CU." }
 
 # ── Environment guards ────────────────────────────────────────────────────

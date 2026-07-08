@@ -53,7 +53,18 @@ if ($files.Count -eq 0) {
     return
 }
 
+# If both a .doc and .docm exist with the same base name (e.g. "report.doc"
+# and "report.docm"), they'd otherwise both map to the identical output
+# filename ("report.docx"/"report.pdf") - whichever is processed second
+# would see both outputs already present and get silently logged as
+# "SKIPPED (already exists)", discarding that file's conversion while
+# making it look handled. Only files with a colliding base name get the
+# extension folded into their output name; everything else keeps the clean
+# "name.docx" naming.
+$duplicateBaseNames = $files | Group-Object BaseName | Where-Object { $_.Count -gt 1 } | Select-Object -ExpandProperty Name
+
 Write-Log "Found $($files.Count) file(s). Starting conversion..."
+$errored = 0
 
 $word = $null
 try {
@@ -66,8 +77,9 @@ try {
     $word.Visible = $false
 
     foreach ($file in $files) {
-        $docxPath = Join-Path $OutputFolder ($file.BaseName + '.docx')
-        $pdfPath  = Join-Path $OutputFolder ($file.BaseName + '.pdf')
+        $outBaseName = if ($duplicateBaseNames -contains $file.BaseName) { "$($file.BaseName)$($file.Extension)" } else { $file.BaseName }
+        $docxPath = Join-Path $OutputFolder ($outBaseName + '.docx')
+        $pdfPath  = Join-Path $OutputFolder ($outBaseName + '.pdf')
 
         if ((Test-Path $docxPath) -and (Test-Path $pdfPath)) {
             Write-Log "SKIPPED (already exists): $($file.Name)"
@@ -99,6 +111,7 @@ try {
             }
         } catch {
             Write-Log "  ERROR: $($file.Name) - $($_.Exception.Message)"
+            $errored++
         } finally {
             if ($null -ne $document) {
                 try { $document.Close($false) } catch {}
@@ -123,4 +136,5 @@ try {
     }
 }
 
-Write-Log "Conversion complete. Log saved to: $LogFile"
+Write-Log "Conversion complete ($errored error(s)). Log saved to: $LogFile"
+exit ($(if ($errored -gt 0) { 1 } else { 0 }))

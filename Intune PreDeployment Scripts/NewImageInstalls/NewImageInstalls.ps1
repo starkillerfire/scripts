@@ -7,6 +7,26 @@ param (
 
 $ProgressPreference = 'SilentlyContinue'   # speeds up Invoke-WebRequest downloads
 
+function Test-DownloadedInstallerSignature {
+    <#
+    .SYNOPSIS
+        Verifies a downloaded installer is validly signed by the expected
+        publisher before it gets executed - none of the four downloads in
+        this script (Chrome MSI, Edge MSI, .NET runtime EXE, DCU EXE) had
+        any integrity check before, unlike the sibling install scripts in
+        this repo.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedSignerPattern
+    )
+    $sig = Get-AuthenticodeSignature -FilePath $Path
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch $ExpectedSignerPattern) {
+        Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+        throw "Downloaded installer at $Path failed Authenticode validation (status: $($sig.Status)) - refusing to run it."
+    }
+}
+
 function Install-Chrome {
     Write-Output ""
     Write-Output "Installing Google Chrome..."
@@ -14,6 +34,7 @@ function Install-Chrome {
         $uri  = "https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi"
         $path = "$PSScriptRoot\googlechromestandaloneenterprise64.msi"
         Invoke-WebRequest -Uri $uri -OutFile $path -UseBasicParsing -ErrorAction Stop
+        Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Google LLC'
         $proc = Start-Process msiexec.exe -ArgumentList "/i `"$path`" /qn /norestart" -Wait -PassThru
         if ($proc.ExitCode -notin @(0, 3010, 1641)) {
             throw "msiexec exited $($proc.ExitCode)"
@@ -56,6 +77,7 @@ function Install-Edge {
     try {
         $path = "$PSScriptRoot\MicrosoftEdgeEnterpriseX64.msi"
         Invoke-WebRequest -Uri $artifact.Location -OutFile $path -UseBasicParsing -ErrorAction Stop
+        Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Microsoft Corporation'
         $proc = Start-Process msiexec.exe -ArgumentList "/i `"$path`" /qn /norestart" -Wait -PassThru
         if ($proc.ExitCode -notin @(0, 3010, 1641)) {
             throw "msiexec exited $($proc.ExitCode)"
@@ -80,6 +102,7 @@ function Install-DotNet {
             $uri  = "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.18/windowsdesktop-runtime-8.0.18-win-x64.exe"
             $path = "$PSScriptRoot\windowsdesktop-runtime-8.0.18-win-x64.exe"
             Invoke-WebRequest -Uri $uri -OutFile $path -UseBasicParsing -ErrorAction Stop
+            Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Microsoft Corporation'
             $proc = Start-Process -Wait -FilePath $path -ArgumentList '/install','/quiet','/norestart' -PassThru
             if ($proc.ExitCode -notin @(0, 3010)) { throw "Installer exited $($proc.ExitCode)" }
             Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
@@ -104,6 +127,7 @@ function Install-DCU {
             $uri  = "https://dl.dell.com/FOLDER13309588M/1/Dell-Command-Update-Windows-Universal-Application_C8JXV_WIN64_5.5.0_A00.EXE"
             $path = "$PSScriptRoot\Dell-Command-Update_5.5.0.exe"
             Invoke-WebRequest -Uri $uri -OutFile $path -UseBasicParsing -ErrorAction Stop
+            Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Dell'
             # /s = silent, /l = log path
             $proc = Start-Process -Wait -FilePath $path -ArgumentList '/s',"/l=$PSScriptRoot\dcu-install.log" -PassThru
             if ($proc.ExitCode -notin @(0, 3010)) { throw "Installer exited $($proc.ExitCode)" }
