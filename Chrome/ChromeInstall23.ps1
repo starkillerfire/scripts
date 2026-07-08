@@ -11,7 +11,7 @@
     CSV file with a "ComputerName" column.
 
 .PARAMETER SourcePath
-    UNC or local path containing the Chrome MSI. No default — must be supplied.
+    UNC or local path containing the Chrome MSI. No default - must be supplied.
 
 .PARAMETER PsExecPath
     Path to PsExec.exe. Defaults to psexec.exe in the same folder as this script.
@@ -73,7 +73,7 @@ foreach ($computer in $computers) {
     Write-Host "[$computer] Starting Chrome install..."
 
     if (-not (Test-Connection -ComputerName $computer -Count 1 -Quiet)) {
-        Write-Warning "[$computer] Not reachable — skipping."
+        Write-Warning "[$computer] Not reachable - skipping."
         $failed.Add($computer)
         continue
     }
@@ -83,7 +83,7 @@ foreach ($computer in $computers) {
 
         robocopy $SourcePath $uncTemp /mir /R:2 /W:2 | Out-Null
         if ($LASTEXITCODE -ge 8) {
-            Write-Warning "[$computer] Robocopy failed (exit $LASTEXITCODE) — skipping."
+            Write-Warning "[$computer] Robocopy failed (exit $LASTEXITCODE) - skipping."
             $failed.Add($computer)
             continue
         }

@@ -109,7 +109,7 @@ function Copy-BrPayload {
         $server = ($ShareSrc -replace '^\\\\([^\\]+)\\.*','$1')
         $drv    = New-PSDrive BRPAY FileSystem "\\$server" -Credential $Credential
         $rel    = $ShareSrc.Substring($server.Length + 3)
-        $share  = "$($drv.Name):\$rel"   # single backslash — double was a path construction bug
+        $share  = "$($drv.Name):\$rel"   # single backslash - double was a path construction bug
     }
 
     try {
@@ -139,7 +139,7 @@ function Copy-BrPayload {
         New-Item $LocalDst -ItemType Directory -Force | Out-Null
 
         if (-not $UseBits) {
-            # /COPY:DAT only — S(ecurity) and O(wner) require SeRestorePrivilege and fail silently as SYSTEM
+            # /COPY:DAT only - S(ecurity) and O(wner) require SeRestorePrivilege and fail silently as SYSTEM
             $flags = '/MIR','/Z','/MT:32','/W:3','/R:3','/COPY:DAT','/NP'
             if ($Incremental) { $flags += '/XO','/XN','/XC' }
             robocopy $share $LocalDst @flags | Out-Null
@@ -261,7 +261,7 @@ function LogMsg { param($m) Add-Content (Join-Path $logRoot 'deploy.log') `
 
 $cfg = Get-BrConfig -Cli $PSBoundParameters
 
-# Build Copy-BrPayload splat explicitly — $cfg also contains Mode/Language which the function doesn't accept
+# Build Copy-BrPayload splat explicitly - $cfg also contains Mode/Language which the function doesn't accept
 $copyArgs = @{
     ShareSrc       = $cfg.ShareSrc
     LocalDst       = $cfg.LocalDst
