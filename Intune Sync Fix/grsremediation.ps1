@@ -20,9 +20,19 @@ function Get-FailedWin32AppStates {
         $enforcementStateMessage = Get-ItemProperty -Path $subKey.PSPath -Name EnforcementStateMessage -ErrorAction SilentlyContinue
         if ($enforcementStateMessage) {
             if ($enforcementStateMessage.EnforcementStateMessage -match '"ErrorCode":(-?\d+|null)') {
-                $errorCode = $matches[1]
-                if ($errorCode -ne "null") {
-                    $errorCode = [int]$errorCode
+                $errorCodeRaw = $matches[1]
+                if ($errorCodeRaw -ne "null") {
+                    # Intune's EnforcementStateMessage sometimes serializes
+                    # HRESULT-style codes as large unsigned decimals (e.g.
+                    # 2147942402 for 0x80070102) that overflow Int32. A hard
+                    # [int] cast used to throw on those, aborting this whole
+                    # function (and every other app's remediation this run)
+                    # instead of just skipping the one unparseable entry.
+                    $errorCode = 0
+                    if (-not [int]::TryParse($errorCodeRaw, [ref]$errorCode)) {
+                        Write-Warning "Skipping unparseable/oversized ErrorCode '$errorCodeRaw' at $($subKey.PSPath)"
+                        continue
+                    }
                     if (($errorCode -ne 0) -and ($errorCode -ne 3010)) {
                         $failedStates += [PSCustomObject]@{
                             SubKeyPath = $subKey.PSPath

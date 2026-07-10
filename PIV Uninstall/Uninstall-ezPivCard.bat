@@ -86,7 +86,16 @@ if defined PROCESSOR_ARCHITEW6432 (
 
 REM %* passes any arguments supplied to this BAT straight through to the PS1.
 REM Example: Uninstall-ezPivCard.bat -DryRun
-%PWSH% -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "%~dp0%ScriptFile%" %*
+REM
+REM NOTE: -NonInteractive is intentionally NOT passed here. The PS1's own
+REM defaults ($showUI/$confirmEachUninstall/$rebootPromptEnabled = $true)
+REM call Read-Host for local interactive use, and -NonInteractive makes any
+REM Read-Host call throw instead of prompting - so it would crash the
+REM script on its own default configuration. Unattended callers (SCCM/
+REM Intune) should pass -Silent, which already disables every Read-Host
+REM path in the PS1 (they're all gated on $showUI), making -NonInteractive
+REM unnecessary for them too.
+%PWSH% -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0%ScriptFile%" %*
 
 REM ----------------------------------------------------------------
 REM Exit handling

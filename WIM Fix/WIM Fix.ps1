@@ -67,6 +67,8 @@ try {
     Write-Log "Unable to determine domain role." "WARN"
 }
 
+$script:hadFailure = $false
+
 Write-Log "=== Starting WMI Repair and Windows Health Check ==="
 
 # Check if WMI is broken
@@ -84,11 +86,25 @@ foreach ($svc in $servicesToStop) {
 }
 Start-Sleep -Seconds 5
 
+# Confirm Winmgmt actually stopped before backing up its repository - a
+# partially-locked copy taken while the service is still running/shutting
+# down can silently produce an incomplete backup right before the
+# destructive salvage/reset steps below run.
+$winmgmtSvc = Get-Service -Name Winmgmt -ErrorAction SilentlyContinue
+if ($winmgmtSvc -and $winmgmtSvc.Status -ne 'Stopped') {
+    Write-Log "Winmgmt did not fully stop (status: $($winmgmtSvc.Status)) - the repository backup below may be incomplete." "WARN"
+}
+
 # Backup repository
 $backupPath = "$env:WINDIR\System32\wbem\Repository_Backup_$(Get-Date -Format 'yyyyMMddHHmmss')"
 New-Item -Path $backupPath -ItemType Directory -Force | Out-Null
-Copy-Item -Path "$env:WINDIR\System32\wbem\Repository\*" -Destination $backupPath -Recurse -Force
-Write-Log "WMI repository backed up to: $backupPath"
+try {
+    Copy-Item -Path "$env:WINDIR\System32\wbem\Repository\*" -Destination $backupPath -Recurse -Force -ErrorAction Stop
+    Write-Log "WMI repository backed up to: $backupPath"
+} catch {
+    Write-Log "WMI repository backup FAILED: $_ - proceeding with repair anyway, but there is no safety net if the salvage/reset below goes wrong." "ERROR"
+    $script:hadFailure = $true
+}
 
 # Attempt to salvage the repository first; only hard-reset if WMI still fails
 cmd /c "winmgmt /salvagerepository" | Out-Null
@@ -154,8 +170,6 @@ function Invoke-RetryCommand {
     return $result
 }
 
-$script:hadFailure = $false
-
 # DISM
 Write-Log "Running DISM..."
 $exitCode = Invoke-RetryCommand -Cmd { (Start-Process DISM -ArgumentList "/Online","/Cleanup-Image","/RestoreHealth" -Wait -PassThru).ExitCode }
@@ -172,6 +186,17 @@ if ($exitCode -ne 0) { Write-Log "SFC encountered issues." "WARN"; $script:hadFa
 foreach ($svc in $servicesToStop) {
     try { Start-Service -Name $svc -ErrorAction SilentlyContinue; Write-Log "Started: $svc" }
     catch { Write-Log "Could not start: $svc" "WARN" }
+}
+
+# Final verification - the exit code and "completed" message below only
+# reflect DISM/SFC results. This confirms whether the actual WMI repair
+# (the reason this script exists) succeeded, since the script could
+# otherwise report success even when the core repair failed.
+if (-not (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue)) {
+    Write-Log "WMI is still unresponsive after all repair steps - the underlying repair did not succeed." "ERROR"
+    $script:hadFailure = $true
+} else {
+    Write-Log "WMI verified responsive after repair."
 }
 
 # Event log

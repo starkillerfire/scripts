@@ -534,6 +534,36 @@ function Clear-OrphanedRegistryHives {
     }
 }
 
+function Backup-PerUserRegistryValue {
+    # HKLM writes are covered by the whole-hive .reg exports in
+    # Export-StigBackup, but per-user registry values written via
+    # Set-PerUserRegistryValue had no backup at all before this - there was
+    # no way to restore a per-user setting to its pre-remediation state.
+    param(
+        [Parameter(Mandatory)][string]$RegExeHivePath,   # reg.exe syntax, e.g. "HKU\S-1-5-21-...\SubKey" or "HKU\TEMP_xxx\SubKey"
+        [Parameter(Mandatory)][string]$SafeName
+    )
+    if (-not $script:BackupPath) { return }
+    if (-not $script:PerUserRegistryBackedUpKeys) {
+        $script:PerUserRegistryBackedUpKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    }
+    # Only the FIRST write to a given per-user subkey in this run captures a
+    # backup - a later call targeting the same subkey (different Name)
+    # would otherwise back up state this run already modified, instead of
+    # the true pre-remediation state.
+    if (-not $script:PerUserRegistryBackedUpKeys.Add($RegExeHivePath)) { return }
+
+    $perUserBackupDir = Join-Path $script:BackupPath 'PerUserRegistry'
+    if (-not (Test-Path -LiteralPath $perUserBackupDir)) {
+        New-Item -Path $perUserBackupDir -ItemType Directory -Force | Out-Null
+    }
+    $safeFileName = ($SafeName -replace '[\\:\*\?"<>\|\s]', '_') + '.reg'
+    $backupFile = Join-Path $perUserBackupDir $safeFileName
+    try {
+        Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('export', $RegExeHivePath, $backupFile, '/y') -IgnoreExitCode | Out-Null
+    } catch { }
+}
+
 function Set-PerUserRegistryValue {
     param(
         [Parameter(Mandatory)][string]$SubKey,
@@ -556,6 +586,7 @@ function Set-PerUserRegistryValue {
         $profilePath = (Get-ItemProperty -Path $profileKey.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue).ProfileImagePath
 
         if (Test-Path -LiteralPath $loadedPath) {
+            Backup-PerUserRegistryValue -RegExeHivePath "HKU\$sid\$SubKey" -SafeName "${sid}_$SubKey"
             Set-StigRegistryValue -Path $targetPath -Name $Name -Type $Type -Value $Value
             continue
         }
@@ -572,6 +603,7 @@ function Set-PerUserRegistryValue {
                 continue
             }
             $loaded = $true
+            Backup-PerUserRegistryValue -RegExeHivePath "HKU\$mountName\$SubKey" -SafeName "${sid}_$SubKey"
             $mountedTarget = "Registry::HKEY_USERS\$mountName\$SubKey"
             Set-StigRegistryValue -Path $mountedTarget -Name $Name -Type $Type -Value $Value
         }
@@ -596,6 +628,7 @@ function Set-PerUserRegistryValue {
                 return
             }
             $loaded = $true
+            Backup-PerUserRegistryValue -RegExeHivePath "HKU\$mountName\$SubKey" -SafeName "DEFAULT_$SubKey"
             $target = "Registry::HKEY_USERS\$mountName\$SubKey"
             Set-StigRegistryValue -Path $target -Name $Name -Type $Type -Value $Value
         }
@@ -1431,12 +1464,33 @@ Write-Host "Rollback root: $Root"
 Get-ChildItem -Path $Root -Filter '*.reg' -File | ForEach-Object {
     Write-Host "Importing registry backup: $($_.Name)"
     & reg.exe import $_.FullName
+    if ($LASTEXITCODE -ne 0) { Write-Warning "reg.exe import failed for $($_.Name) (exit $LASTEXITCODE)" }
+}
+
+$PerUserRegBackupDir = Join-Path $Root 'PerUserRegistry'
+if (Test-Path -LiteralPath $PerUserRegBackupDir) {
+    Get-ChildItem -Path $PerUserRegBackupDir -Filter '*.reg' -File | ForEach-Object {
+        # Backups rooted at a temporarily-mounted hive (HKU\TEMP_...) can't
+        # be auto-restored - that mount name only existed for the duration
+        # of the original remediation run and is gone now. Backups rooted
+        # at a real SID (HKU\S-1-5-21-...) restore normally via reg.exe
+        # import as long as that user's hive happens to be loaded right now.
+        $regContent = Get-Content -LiteralPath $_.FullName -TotalCount 3 -ErrorAction SilentlyContinue
+        if ($regContent -match 'HKEY_USERS\\TEMP_') {
+            Write-Warning "Per-user backup '$($_.Name)' targeted a temporarily-mounted hive that no longer exists - restore manually: reg.exe load HKU\RestoreTemp <that user's NTUSER.DAT>, edit this file's root key to HKEY_USERS\RestoreTemp, reg.exe import it, then reg.exe unload HKU\RestoreTemp."
+            return
+        }
+        Write-Host "Importing per-user registry backup: $($_.Name)"
+        & reg.exe import $_.FullName
+        if ($LASTEXITCODE -ne 0) { Write-Warning "reg.exe import failed for $($_.Name) (exit $LASTEXITCODE) - the target user's hive may not currently be loaded." }
+    }
 }
 
 $AuditBackup = Join-Path $Root 'auditpol_before.csv'
 if (Test-Path -LiteralPath $AuditBackup) {
     Write-Host 'Restoring audit policy backup'
     & auditpol.exe /restore /file:$AuditBackup
+    if ($LASTEXITCODE -ne 0) { Write-Warning "auditpol.exe /restore failed (exit $LASTEXITCODE)" }
 }
 
 $SeceditBackup = Join-Path $Root 'secedit_export.inf'
@@ -1444,12 +1498,14 @@ if (Test-Path -LiteralPath $SeceditBackup) {
     Write-Host 'Restoring local security policy and user rights from secedit export'
     $db = Join-Path $Root 'rollback.sdb'
     & secedit.exe /configure /db $db /cfg $SeceditBackup /areas SECURITYPOLICY USER_RIGHTS
+    if ($LASTEXITCODE -ne 0) { Write-Warning "secedit.exe /configure failed (exit $LASTEXITCODE) - local security policy/user rights may not have been restored" }
 }
 
 $FirewallBackup = Join-Path $Root 'firewall_before.wfw'
 if (Test-Path -LiteralPath $FirewallBackup) {
     Write-Host 'Restoring Windows Firewall policy'
     & netsh.exe advfirewall import $FirewallBackup
+    if ($LASTEXITCODE -ne 0) { Write-Warning "netsh.exe advfirewall import failed (exit $LASTEXITCODE) - firewall policy may not have been restored" }
 }
 
 $ServicesCsv = Join-Path $Root 'services_before.csv'
@@ -1816,12 +1872,21 @@ function Convert-OvalValueForRegistry {
     if ($datatype -eq 'int') {
         try {
             [int]$intValue = [int]$text
-            if ($operation -eq 'greater than') { $intValue++ }
             $value = $intValue
         }
         catch { return $null }
     }
 
+    # Value stays the literal OVAL threshold N here (no +1 for 'greater
+    # than') because it's reused later for BOTH remediation and
+    # post-remediation validation via the same Operation. Validation
+    # compares actual -gt N (matching the original OVAL semantics exactly);
+    # incrementing N here used to double-apply the "strictly greater"
+    # requirement - the validator would then require actual -gt (N+1),
+    # so a remediation that wrote the correct minimal compliant value
+    # (N+1) always failed its own very next validation pass. Callers that
+    # need "the minimal value that satisfies this constraint" (i.e. actual
+    # remediation writes) compute N+1 themselves from Operation/Value.
     [pscustomobject]@{ DataType=$datatype; Operation=$operation; Value=$value }
 }
 #endregion SCAP/XCCDF XML Import & OVAL Interpretation
@@ -1875,17 +1940,28 @@ function Get-ScapDrivenRegistryActions {
                 if (-not $converted) { continue }
 
                 $registryType = Convert-OvalDataTypeToRegistryType -DataType $converted.DataType -Value $converted.Value -Key $key -Name $name
+                # RemediationValue is the value actually written to the
+                # registry - for a strict 'greater than N' constraint, the
+                # minimal compliant value is N+1. Value itself stays the
+                # literal OVAL threshold N so post-remediation validation
+                # (which re-applies the same Operation) checks against the
+                # true threshold instead of double-incrementing.
+                $remediationValue = $converted.Value
+                if ($converted.Operation -eq 'greater than' -and $converted.DataType -eq 'int') {
+                    $remediationValue = [int]$converted.Value + 1
+                }
                 $actions.Add([pscustomobject]@{
-                    RuleId     = $rule.Version
-                    Title      = $rule.Title
-                    Hive       = $hive
-                    Key        = $key
-                    Name       = $name
-                    Type       = $registryType
-                    Value      = $converted.Value
-                    Operation  = $converted.Operation
-                    SourceTest = $testRef
-                    Complex    = ($ruleInfo.HasOr -or $ruleInfo.HasNegate)
+                    RuleId           = $rule.Version
+                    Title            = $rule.Title
+                    Hive             = $hive
+                    Key              = $key
+                    Name             = $name
+                    Type             = $registryType
+                    Value            = $converted.Value
+                    RemediationValue = $remediationValue
+                    Operation        = $converted.Operation
+                    SourceTest       = $testRef
+                    Complex          = ($ruleInfo.HasOr -or $ruleInfo.HasNegate)
                 }) | Out-Null
             }
         }
@@ -1894,13 +1970,28 @@ function Get-ScapDrivenRegistryActions {
     return @($actions.ToArray())
 }
 
+function Get-ScapRegistryConflictKey {
+    # Convert-RegistryPathFromOval treats HKLM/HKEY_LOCAL_MACHINE (and
+    # HKCU/HKEY_CURRENT_USER) as the same hive, but conflict detection below
+    # used to group on the raw Hive string - two rules targeting the exact
+    # same key/value via different hive alias spellings would land in
+    # separate groups and bypass conflict detection entirely.
+    param([string]$Hive, [string]$Key, [string]$Name)
+    $normalizedHive = switch ($Hive.Trim().ToUpperInvariant()) {
+        'HKLM'  { 'HKEY_LOCAL_MACHINE' }
+        'HKCU'  { 'HKEY_CURRENT_USER' }
+        default { $_ }
+    }
+    return "$normalizedHive|$($Key.Trim('\'))|$Name"
+}
+
 function Invoke-ScapDrivenRegistryRemediation {
     if ($SkipScapDrivenRegistry) { return }
     Write-Section 'Applying SCAP-driven registry remediations from XML'
 
     $actions = Get-ScapDrivenRegistryActions
     $conflicts = @{}
-    $grouped = $actions | Group-Object -Property Hive,Key,Name
+    $grouped = $actions | Group-Object -Property { Get-ScapRegistryConflictKey -Hive $_.Hive -Key $_.Key -Name $_.Name }
     foreach ($group in $grouped) {
         $distinctValues = @($group.Group | ForEach-Object { [string]$_.Value } | Select-Object -Unique)
         if ($distinctValues.Count -gt 1) {
@@ -1912,7 +2003,7 @@ function Invoke-ScapDrivenRegistryRemediation {
 
     $applied = 0
     foreach ($action in $actions) {
-        $keyName = "$($action.Hive), $($action.Key), $($action.Name)"
+        $keyName = Get-ScapRegistryConflictKey -Hive $action.Hive -Key $action.Key -Name $action.Name
         if ($conflicts.ContainsKey($keyName)) { continue }
 
         $providerPath = Convert-RegistryPathFromOval -Hive $action.Hive -Key $action.Key
@@ -1921,10 +2012,10 @@ function Invoke-ScapDrivenRegistryRemediation {
         try {
             if ($providerPath -like 'Registry::HKEY_CURRENT_USER*') {
                 $subKey = $action.Key
-                Set-PerUserRegistryValue -SubKey $subKey -Name $action.Name -Type $action.Type -Value $action.Value
+                Set-PerUserRegistryValue -SubKey $subKey -Name $action.Name -Type $action.Type -Value $action.RemediationValue
             }
             else {
-                Set-StigRegistryValue -Path $providerPath -Name $action.Name -Type $action.Type -Value $action.Value
+                Set-StigRegistryValue -Path $providerPath -Name $action.Name -Type $action.Type -Value $action.RemediationValue
             }
             $applied++
         }
@@ -2000,6 +2091,20 @@ function Get-ScapAuditActions {
 
 function Invoke-ScapDrivenAuditPolicy {
     Write-Section 'Applying audit policy from SCAP XML'
+
+    # auditpol.exe /set /subcategory:<name> matches the LOCALIZED subcategory
+    # display name, but every name in Get-ScapAuditNameMap is hardcoded in
+    # English. Microsoft does define locale-independent GUIDs for each
+    # subcategory (auditpol also accepts /subcategory:{GUID}), but a fully
+    # verified GUID-to-subcategory table wasn't available to transcribe here
+    # with confidence - a single wrong GUID would silently misconfigure a
+    # completely different subcategory, which is worse than this known
+    # limitation. Flagging it clearly instead of guessing.
+    $osLanguage = (Get-WinSystemLocale -ErrorAction SilentlyContinue).TwoLetterISOLanguageName
+    if ($osLanguage -and $osLanguage -ne 'en') {
+        Add-OutstandingItem "This OS's system locale ('$osLanguage') is not English - audit policy subcategory names in this script are hardcoded in English, and auditpol.exe matches on the localized display name, so these audit policy settings may silently fail to apply. Verify with 'auditpol /get /category:*' after this run and set any missing subcategories manually (auditpol supports /subcategory:{GUID} for locale-independent targeting)."
+    }
+
     $desired = Get-ScapAuditActions
     foreach ($subcategory in $desired.Keys) {
         try { Set-AuditPolicy -Subcategory $subcategory -Success $desired[$subcategory].Success -Failure $desired[$subcategory].Failure }
@@ -2127,6 +2232,21 @@ function Invoke-PowerStigBaseline {
 
 function Invoke-LocalSecurityPolicyRemediation {
     Write-Section 'Applying local security policy and user rights'
+
+    # -UseEveryoneForDenyRdp denies Remote Interactive Logon to S-1-1-0
+    # (Everyone) below, which includes local/domain Administrators - deny
+    # rights always win over allow rights in Windows, so this can lock out
+    # ALL remote console access to this machine with no way back in except
+    # a local/console logon. Read-StigYesNo safely falls back to
+    # $DefaultYes ($false, i.e. declined) if this ever runs non-interactively.
+    if ($UseEveryoneForDenyRdp) {
+        $confirmedEveryoneDenyRdp = Read-StigYesNo -Prompt 'WARNING: -UseEveryoneForDenyRdp denies RDP (Remote Interactive Logon) to EVERYONE, including Administrators. This can lock out all remote access to this machine except local console logon. Proceed?' -DefaultYes $false
+        if (-not $confirmedEveryoneDenyRdp) {
+            Write-Warning 'Declined - using the standard deny list (Guests/Domain Admins/Enterprise Admins/local account) for SeDenyRemoteInteractiveLogonRight instead of Everyone.'
+            $UseEveryoneForDenyRdp = $false
+        }
+    }
+
     $domainContext = Get-DomainContext
 
     $admins = 'S-1-5-32-544'
@@ -2386,7 +2506,7 @@ function Invoke-FirewallScopeRemediation {
     }
 
     Write-Section 'Restricting inbound allow rules to authorized remote management hosts'
-    Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-StigRemoteManagementFirewallRules | ForEach-Object {
         try {
             Set-NetFirewallRule -Name $_.Name -RemoteAddress $AuthorizedRemoteManagementHosts -ErrorAction Stop
         }
@@ -2820,7 +2940,13 @@ try {
     else {
         Invoke-PowerStigBaseline
         Invoke-LocalSecurityPolicyRemediation
-        Rename-BuiltInAccounts
+        # Unlike its sibling remediation functions, this had no local
+        # try/catch - an exception here (e.g. Rename-LocalUser blocked by
+        # policy) would propagate to the outer Main catch and skip every
+        # remaining remediation step below, including the BitLocker PIN
+        # enablement and the post-reboot validation marker.
+        try { Rename-BuiltInAccounts }
+        catch { Add-OutstandingItem "Renaming built-in Administrator/Guest accounts failed: $($_.Exception.Message)" }
         Invoke-FeatureAndServiceRemediation
         Invoke-HardCodedRegistryRemediation
         Invoke-ScapDrivenRegistryRemediation
@@ -2833,7 +2959,14 @@ try {
 
         if ($null -ne $StartupPin) {
             Suspend-StigTranscript
+            # A failure here (e.g. Add-BitLockerKeyProtector/Enable-BitLocker
+            # erroring on a PIN/hardware issue) used to propagate straight to
+            # the outer Main catch, skipping post-validation, the
+            # certificate report, and New-PostRebootValidationScript below -
+            # losing the resume marker even though a reboot may already be
+            # required from earlier remediation steps.
             try { Invoke-BitLockerRemediation -Pin $StartupPin }
+            catch { Add-OutstandingItem "BitLocker TPM+PIN remediation failed: $($_.Exception.Message)" }
             finally { Resume-StigTranscript }
         }
         else {

@@ -56,11 +56,12 @@ function Clear-OldProfilesOnMachine {
 
     Write-Log "Processing: $TargetComputer"
 
-    if (-not (Test-Connection -ComputerName $TargetComputer -Count 1 -Quiet)) {
-        Write-Log "$TargetComputer is not reachable - skipping." 'WARN'
-        return
-    }
-
+    # No ICMP ping pre-check here on purpose: this script's whole design is
+    # to talk over DCOM/WMI, not WinRM/ping, and ICMP is commonly blocked by
+    # firewall/GPO on locked-down networks even when DCOM/WMI (port 135 +
+    # RPC) works fine - a ping-based gate would skip those machines as
+    # "unreachable" when they're actually reachable. New-CimSession below is
+    # the real connectivity test, and its failure is already caught.
     $cimSession = $null
     try {
         # Win32_UserProfile via DCOM - no WinRM required, per this script's

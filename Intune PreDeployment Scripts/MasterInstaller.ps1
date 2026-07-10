@@ -144,8 +144,15 @@ function Invoke-FallbackScript {
     $oldPol = Get-ExecutionPolicy -Scope Process
     try {
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Path -ErrorAction Stop
+        # -ErrorAction Stop here never actually caught a nonzero exit code -
+        # only a real launch failure (missing exe, etc.) throws a
+        # terminating error for an external process. A fallback script that
+        # legitimately failed (e.g. installAcrobat.ps1 exiting 1) fell
+        # straight through with no signal to the caller, which then always
+        # treated it as a success.
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Path
         if ($LASTEXITCODE -in 3010, 1641) { $script:AnyRebootNeeded = $true }
+        return ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -in 3010, 1641)
     } finally {
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy $oldPol -Force
     }
@@ -249,8 +256,7 @@ try {
         }
         if (-not $success) {
             Write-Log -Level 'Warning' -Message "Winget unavailable or failed for $($product.Name); falling back"
-            Invoke-FallbackScript -Path $product.Fallback -Sha256 $product.Sha256
-            $success = $true
+            $success = Invoke-FallbackScript -Path $product.Fallback -Sha256 $product.Sha256
         }
 
         if ($success) {
@@ -279,9 +285,19 @@ try {
         try {
             $oldPol = Get-ExecutionPolicy -Scope Process
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
-            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $wuScriptPath -ErrorAction Stop
-            Write-Log -Level 'Information' -Message 'Windows Updates script completed successfully.'
-            $summary['WindowsUpdates'] = @{ Status = 'Completed'; Script = 'Windows Updates.ps1' }
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $wuScriptPath
+            # A nonzero exit code from an external process does not throw a
+            # terminating PowerShell error (even with -ErrorAction Stop), so
+            # this always logged "completed successfully" regardless of
+            # whether Windows Updates.ps1 actually failed.
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log -Level 'Information' -Message 'Windows Updates script completed successfully.'
+                $summary['WindowsUpdates'] = @{ Status = 'Completed'; Script = 'Windows Updates.ps1' }
+            } else {
+                Write-Log -Level 'Warning' -Message "Windows Updates script exited with code $LASTEXITCODE."
+                $summary['WindowsUpdates'] = @{ Status = "ExitCode_$LASTEXITCODE"; Script = 'Windows Updates.ps1' }
+                if ($LASTEXITCODE -in 3010, 1641) { $script:AnyRebootNeeded = $true }
+            }
         } catch {
             Write-Log -Level 'Error' -Message "Windows Updates script failed: $_"
             $summary['WindowsUpdates'] = @{ Status = 'Failed'; Error = "$_" }

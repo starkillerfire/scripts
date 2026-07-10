@@ -84,7 +84,14 @@ function Get-BrConfig {
         MinFreeGB = 5
         Language  = 'en-US'
     }
-    return $defaults + $Cli
+    # The + operator on hashtables throws if a key exists in both - which it
+    # always will here whenever a caller passes -Mode, -ShareSrc, etc. (and
+    # the script's own self-installed cleanup task always passes -Mode
+    # Cleanup). Overlaying $Cli onto a clone of $defaults instead lets bound
+    # params override the default for that key without colliding.
+    $merged = $defaults.Clone()
+    foreach ($key in $Cli.Keys) { $merged[$key] = $Cli[$key] }
+    return $merged
 }
 
 function Copy-BrPayload {

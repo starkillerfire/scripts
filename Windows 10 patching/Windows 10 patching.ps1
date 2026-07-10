@@ -20,6 +20,7 @@ param(
     # ---------- behaviour ----------
     [switch]      $NoDrivers,
     [switch]      $NoFeatureUpgrades,
+    [switch]      $NoAutoReboot,
     [int]         $RingChunkSize       = 250,
     [int]         $ThrottleLimit,
     [int]         $MaxRetry            = 3,
@@ -50,8 +51,11 @@ if ($Credential) {
 elseif ($CMTarget) {
     $cm = Get-StoredCredential -Target $CMTarget
     if (-not $cm) { throw "Credential '$CMTarget' not found in Credential Manager." }
-    $AdminCred = New-Object PSCredential ($cm.UserName,
-                ($cm.Password | ConvertTo-SecureString -AsPlainText -Force))
+    # $cm.Password from the CredentialManager module is already a
+    # SecureString, not plaintext - piping it into ConvertTo-SecureString
+    # -AsPlainText (which expects a String) threw a type-binding error
+    # before any target was ever touched. It can be used directly.
+    $AdminCred = New-Object PSCredential ($cm.UserName, $cm.Password)
 }
 else {
     $AdminCred = Get-Credential -Message "Admin creds for target machines"
@@ -136,6 +140,7 @@ param(
     [string] $PSWUVersion,
     [switch] $ExcludeDrivers,
     [switch] $ExcludeFeatureUpgrades,
+    [switch] $SuppressReboot,
     [int]    $CatchupHours,
     [int]    $CatchupSpanDays
 )
@@ -154,7 +159,17 @@ $bkDir = "$env:ProgramData\WinUpdateSweep"
 New-Item -ItemType Directory -Path $bkDir -Force | Out-Null
 $bkBefore = Join-Path $bkDir 'WU_Before.reg'
 $bkAfter  = Join-Path $bkDir 'WU_After.reg'
-reg.exe export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate" $bkBefore /y | Out-Null
+$wuKeyPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate"
+reg.exe export $wuKeyPath $bkBefore /y | Out-Null
+# On a machine with no WSUS/GPO-managed WindowsUpdate key (common off a
+# WSUS-governed network), reg.exe export fails and $bkBefore never gets
+# created - tracked here so the rollback import and registry diff below
+# can skip cleanly instead of throwing on a missing file (which would
+# abort this whole remote payload under $ErrorActionPreference = 'Stop').
+$bkBeforeOk = ($LASTEXITCODE -eq 0) -and (Test-Path $bkBefore)
+if (-not $bkBeforeOk) {
+    Log "WARNING: could not export '$wuKeyPath' before the MU flip (key may not exist) - WSUS rollback will be skipped for this node."
+}
 
 # ---- module pin ----
 if (-not (Get-Module -ListAvailable PSWindowsUpdate |
@@ -197,7 +212,11 @@ if ($updates) {
 # ---- reboot if needed ----
 if ((Get-WURebootStatus).RebootNeeded) {
     Log "Pending reboot"
-    shutdown /r /t 30 /c "PatchSweep updates"
+    if ($SuppressReboot) {
+        Log "Reboot suppressed by -NoAutoReboot - node stays pending until the offline catch-up task or a manual restart."
+    } else {
+        shutdown /r /t 30 /c "PatchSweep updates"
+    }
 }
 
 # Roll back the MU flip set earlier in this payload (Set-PSWUSettings
@@ -210,13 +229,20 @@ if ((Get-WURebootStatus).RebootNeeded) {
 # succeeded - it is the "WSUS rollback" half of the MU-flip+WSUS-rollback
 # design described at the top of this script, not a failure-only recovery
 # step.
-reg.exe export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate" $bkAfter /y | Out-Null
-reg.exe import $bkBefore | Out-Null
+reg.exe export $wuKeyPath $bkAfter /y | Out-Null
+if ($bkBeforeOk) {
+    reg.exe import $bkBefore | Out-Null
+    if ($LASTEXITCODE -ne 0) { Log "WARNING: reg.exe import of pre-flip WindowsUpdate settings failed (exit $LASTEXITCODE)." }
+} else {
+    Log "Skipping WSUS rollback import - no pre-flip backup was captured."
+}
 gpupdate /target:computer /force /wait:0 | Out-Null
 
 # ---- registry diff ----
-$diff = Compare-Object (Get-Content $bkBefore) (Get-Content $bkAfter)
-if ($diff) { Log "WU registry diff:`n$($diff | Out-String)" }
+if ($bkBeforeOk -and (Test-Path $bkAfter)) {
+    $diff = Compare-Object (Get-Content $bkBefore) (Get-Content $bkAfter)
+    if ($diff) { Log "WU registry diff:`n$($diff | Out-String)" }
+}
 
 # ---- offline catch-up task ----
 $taskXml = @"
@@ -279,7 +305,7 @@ foreach ($ring in $TargetChunks) {
         }
 
         $job = Invoke-Command -Session $session -ScriptBlock $RemotePayload -ArgumentList `
-               $CentralLogShare,$PSWUVersion,$NoDrivers,$NoFeatureUpgrades,`
+               $CentralLogShare,$PSWUVersion,$NoDrivers,$NoFeatureUpgrades,$NoAutoReboot,`
                $OffLineCatchupHours,$OffLineCatchupSpan -ErrorAction SilentlyContinue
 
         # $job holds the [pscustomobject] each node returns at the end of

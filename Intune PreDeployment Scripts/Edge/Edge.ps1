@@ -224,12 +224,19 @@ try {
         exit [DeployExit]::DownloadFail
     }
 
-    # 5.9 Optional cert pin
-    if ($PinnedThumbprint) {
-        $Sig = Get-AuthenticodeSignature $Installer
-        if ($Sig.Status -ne 'Valid' -or $Sig.SignerCertificate.IssuerThumbprint -ne $PinnedThumbprint) {
-            Write-Log 'Certificate pin check failed.' $EvtHashFail 'Error'; exit [DeployExit]::OtherError
-        }
+    # 5.9 Authenticode verification
+    # Unconditional - independent of -PinnedThumbprint (which is opt-in and
+    # empty by default) and of the hash check in Invoke-VerifiedDownload
+    # (which silently skips if the feed's Hash field is empty). Without
+    # this, an artifact with no Hash and no pinned thumbprint would run as
+    # SYSTEM with zero integrity verification at all.
+    $Sig = Get-AuthenticodeSignature $Installer
+    if ($Sig.Status -ne 'Valid' -or $Sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+        Write-Log "Installer failed Authenticode validation (status: $($Sig.Status))." $EvtHashFail 'Error'
+        exit [DeployExit]::OtherError
+    }
+    if ($PinnedThumbprint -and $Sig.SignerCertificate.IssuerThumbprint -ne $PinnedThumbprint) {
+        Write-Log 'Certificate pin check failed.' $EvtHashFail 'Error'; exit [DeployExit]::OtherError
     }
     Unblock-File $Installer
 

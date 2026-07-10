@@ -71,7 +71,13 @@ try {
 
     # 3. VC++ prerequisites
     foreach ($vc in 'ms_vcredist_x86_2013','ms_vcredist_x86_2017') {
-        $vcExe = Get-ChildItem (Join-Path $root "Prerequisite\$vc") -Filter *.exe
+        # Select-Object -First 1 + an explicit not-found check avoids two
+        # failure modes Start-Process would otherwise hit blindly: $vcExe
+        # being $null (zero matches, since .FullName on $null throws a
+        # confusing parameter-binding error) or an array (multiple matches,
+        # which -FilePath can't bind to a single path string).
+        $vcExe = Get-ChildItem (Join-Path $root "Prerequisite\$vc") -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $vcExe) { throw "No prerequisite installer .exe found for $vc under $root\Prerequisite\$vc" }
         Start-Process $vcExe.FullName -ArgumentList '/install','/quiet','/norestart' -Wait
     }
 

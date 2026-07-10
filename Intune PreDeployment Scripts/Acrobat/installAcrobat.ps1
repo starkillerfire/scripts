@@ -13,9 +13,11 @@
     • Full transcript saved to C:\Patches\Logs\Acrobat-YYYY-MM-DD-transcript.log
 #>
 
-# ───────────────────────── BEGIN ─────────────────────────
-BEGIN {
-    $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatically speeds up downloads
+# This script has no pipeline input, so it's plain top-level code rather
+# than BEGIN/PROCESS/END blocks - those only run PROCESS once per pipeline
+# item, and with zero items piped in (the normal "-File installAcrobat.ps1"
+# invocation used everywhere this is called), PROCESS never ran at all.
+$ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatically speeds up downloads
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     $Software        = 'Acrobat'
@@ -143,10 +145,6 @@ BEGIN {
     $runContext = if ($isSystem) { 'SYSTEM' } else { $env:USERNAME }
     TimeStamp "=== $Software 64-bit deployment started on $env:COMPUTERNAME (context: $runContext) ==="
     TimeStamp "Version before: $(Get-AcrobatVersion)"
-}
-
-# ──────────────────────── PROCESS ────────────────────────
-PROCESS {
 
     # =========================================================
     # PRIMARY: winget
@@ -314,10 +312,6 @@ PROCESS {
             $needsPatch = $true
         }
     }
-}
-
-# ───────────────────────── END ──────────────────────────
-END {
 
     if ($needsPatch) {
         # ----------- locate and apply newest 64-bit MSP patch -----------
@@ -381,4 +375,3 @@ END {
     TimeStamp "Cleaning up temp files..."
     TimeStamp "=== Deployment finished (via $method) on $env:COMPUTERNAME ==="
     Exit-Script 0
-}

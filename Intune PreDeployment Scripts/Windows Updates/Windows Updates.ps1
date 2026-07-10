@@ -57,7 +57,13 @@ function Stop-UpdateScript{
     $type=if($code -eq 0){[System.Diagnostics.EventLogEntryType]::Information}elseif($code -eq 1){[System.Diagnostics.EventLogEntryType]::Warning}else{[System.Diagnostics.EventLogEntryType]::Error}
     Write-UpdateEvent $m $type 6000
     try{Stop-Transcript}catch{}
-    try{$script:Mutex.ReleaseMutex()}catch{}
+    # The mutex is created with initiallyOwned:$false and this thread never
+    # calls WaitOne() to take ownership - it's only used as a system-wide
+    # "has an instance already started" check via $lockOK (createdNew).
+    # ReleaseMutex() requires the calling thread to actually own the mutex,
+    # so calling it here always threw. Dispose() just closes this process's
+    # handle to the named mutex and needs no ownership.
+    try{$script:Mutex.Dispose()}catch{}
     exit $code
 }
 
@@ -221,7 +227,7 @@ if($WingetCatchUp){
 
 Remove-Resume
 Stop-Transcript
-$script:Mutex.ReleaseMutex()
+try{$script:Mutex.Dispose()}catch{}
 if($script:HadErrors){$exit=2}elseif($script:Skipped){$exit=1}else{$exit=0}
 Write-UpdateEvent 'Update-All end' ([System.Diagnostics.EventLogEntryType]::Information) 6006
 if(Get-Module -ListAvailable BurntToast){try{Import-Module BurntToast -ErrorAction SilentlyContinue;New-BurntToastNotification -Text 'Updates applied','System may reboot.' -Silent}catch{}}

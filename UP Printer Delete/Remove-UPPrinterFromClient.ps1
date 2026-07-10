@@ -447,6 +447,20 @@ try {
     Write-OK "Print Spooler restarted."
 } catch {
     Write-Fail "Could not restart Spooler: $_"
+    # One retry after a short delay before giving up - a handle transiently
+    # held by another process during Stop-Service is common enough that a
+    # short-delayed Start-Service retry often succeeds. If it still fails,
+    # this needs to be visible in the final summary (not just scrolled past
+    # in the console) - a stopped Print Spooler means printing is completely
+    # broken on this machine with no other automatic recovery.
+    Start-Sleep -Seconds 5
+    try {
+        Start-Service -Name Spooler -ErrorAction Stop
+        Write-OK "Print Spooler started on retry."
+    } catch {
+        Write-Fail "Print Spooler could not be restarted after retry: $_"
+        $failedItems.Add('Spooler service is NOT RUNNING - printing is broken on this machine. Manual intervention required.') | Out-Null
+    }
 }
 
 # ────────────────────────────────────────────────────────────────────────────────

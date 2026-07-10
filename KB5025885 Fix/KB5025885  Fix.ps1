@@ -2,7 +2,8 @@
    SecureBoot-Mitigation_Win10.ps1  ·  v2025-06-18  ·  PowerShell 5.1
    Mitigates CVE-2023-24932 (BlackLotus) on Windows 10 21H2 / 22H2
    - Dynamic build gate           - Four Secure-Boot phases
-   - Optional WinRE SafeOS update - Optional USB export of WinRE
+   - -UpdateWinRE locates WinRE and warns it must be patched manually
+     (this script does not apply the SafeOS DU itself) - Optional USB export of WinRE
    - BitLocker protectors re-enabled after Phase 4
    © Samual Carman CPN-CCAO
    Version 1.3 - last updated 6/13. Find the latest version on GitHub
@@ -97,12 +98,19 @@ function Test-DBXGood { ([Text.Encoding]::ASCII.GetString((Get-SecureBootUEFI -N
 
 # ── Optional WinRE SafeOS DU ──────────────────────────────────────────────
 function Update-WinRE {
+    # This only locates and reports the WinRE directory - it does NOT
+    # download or apply a SafeOS Dynamic Update. Doing that safely requires
+    # mounting the WinRE image via DISM and applying the specific SafeOS DU
+    # package for this exact build, whose download URL/KB varies by build
+    # and isn't something to guess at here. Applying it is a manual step;
+    # this function's job is only to point the operator at where to do it.
     $info = reagentc /info 2>&1
     if ($LASTEXITCODE -ne 0 -or $info -match 'Disabled') { Write-Log 'WinRE disabled; SafeOS DU skipped.' 'Warning'; return }
     $loc  = ($info | Select-String 'WinRE location').Line
     if (-not $loc) { Write-Log 'Cannot locate WinRE.' 'Warning'; return }
     $winreDir = $loc.Split(':',2)[1].Trim()
-Write-Log ("WinRE directory found: {0}" -f $winreDir)
+    Write-Log ("WinRE directory found: {0}" -f $winreDir)
+    Write-Log '-UpdateWinRE does not apply the SafeOS Dynamic Update automatically. WinRE boot components remain unpatched against this CVE until the matching SafeOS DU for this exact build is applied manually (mount the WinRE image with DISM /Mount-Image and apply the SafeOS DU package for this OS build, then DISM /Unmount-Image /Commit).' 'Warning'
 }
 
 # ── Optional USB export of WinRE ───────────────────────────────────────────
@@ -125,7 +133,16 @@ function Export-WinRE {
 function Invoke-Phase {
     param([string]$Name,[int]$Mask,[int[]]$Events,[ref]$Result)
     Write-Log "→ $Name"
-    if ($WhatIf) { Write-Log "[WhatIf] Would set AvailableUpdates=0x$([Convert]::ToString($Mask,16))"; return }
+    if ($WhatIf) {
+        Write-Log "[WhatIf] Would set AvailableUpdates=0x$([Convert]::ToString($Mask,16))"
+        # Report this phase as "would succeed" instead of leaving $Result at
+        # its $false default - otherwise every -WhatIf run falls through the
+        # "$P1 -and $P2 -and $P3 -and $P4" gate below as if it had actually
+        # failed, logging an Error-level "Mitigation failed" event and
+        # exiting 1 for what was only ever a preview.
+        $Result.Value = $true
+        return
+    }
     New-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Force > $null
     Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -Value $Mask -Type DWord -Force
     Start-ScheduledTask -TaskPath '\Microsoft\Windows\PI\' -TaskName 'Secure-Boot-Update'
@@ -160,7 +177,13 @@ if (-not (Test-DBXGood)) { Invoke-Phase 'Phase 3 - Revoke PCA 2011' 0x180 @(1037
 Invoke-Phase             'Phase 4 - SVN lock-in'    0x280 @(1800,1796,1797,1798) ([ref]$P4)
 
 # ── BitLocker re-enable & summary ─────────────────────────────────────────
-if ($P1 -and $P2 -and $P3 -and $P4) {
+# $WhatIf is checked first and short-circuits before any real change here
+# (manage-bde, Remove-ItemProperty) - without this, a WhatIf run where every
+# phase reported "would succeed" would fall into the real-mitigation branch
+# and actually re-enable BitLocker / clear the registry value for real.
+if ($WhatIf) {
+    Write-Log 'WhatIf preview complete - no changes were made.'; $exit = 0
+} elseif ($P1 -and $P2 -and $P3 -and $P4) {
     if ((Get-BitLockerVolume -MountPoint 'C:').ProtectionStatus -eq 'Off') {
         manage-bde -protectors -enable C: > $null
         Write-Log 'BitLocker protectors re-enabled.'

@@ -54,7 +54,14 @@ $mutex = [Threading.Mutex]::new($true,'Global\DCUUpdateLock',[ref]$lock)
 if (-not $lock) { Write-Host 'Another instance is running.'; exit 255 }
 Register-EngineEvent PowerShell.Exiting -Action {
         try { Stop-Transcript -EA 0 } catch {}
-        $mutex.ReleaseMutex()
+        # This is a safety-net release for exits that skip past the normal
+        # end-of-script $mutex.ReleaseMutex() call below (Ctrl+C, an
+        # unexpected terminating error, etc.). On a normal run, that call
+        # already released the mutex by the time this fires, and a second
+        # ReleaseMutex() on an already-released mutex throws - harmless to
+        # the exit code by this point, but a confusing stray error during
+        # shutdown otherwise.
+        try { $mutex.ReleaseMutex() } catch {}
 } | Out-Null
 
 if ((Get-PSDrive C).Free/1MB -lt 1024) { throw 'Need ≥1 GB free on C:' }

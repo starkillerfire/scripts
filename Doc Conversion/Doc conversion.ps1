@@ -75,6 +75,11 @@ try {
         throw
     }
     $word.Visible = $false
+    # Without this, a modal Word prompt (format-compatibility warning on
+    # .docm->.docx, "convert file" prompt on legacy .doc, etc.) pops up
+    # invisibly (since Visible = $false) and blocks forever with no session
+    # to dismiss it - hanging the whole batch with no timeout.
+    $word.DisplayAlerts = 0   # wdAlertsNone
 
     foreach ($file in $files) {
         $outBaseName = if ($duplicateBaseNames -contains $file.BaseName) { "$($file.BaseName)$($file.Extension)" } else { $file.BaseName }
@@ -87,6 +92,9 @@ try {
         }
 
         Write-Log "Processing: $($file.Name)"
+        if ($file.Extension -match '(?i)\.docm$') {
+            Write-Log "  NOTE: $($file.Name) is macro-enabled (.docm) - VBA macros are NOT preserved in the converted .docx (a macro-free format)."
+        }
         $document = $null
         try {
             $document = $word.Documents.Open(

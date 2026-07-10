@@ -50,9 +50,18 @@ function Get-HResultText {
 
     if ($null -eq $Code) { return $null }
 
-    switch ($Code) {
+    # A REG_DWORD with the high bit set (as every HRESULT failure code has,
+    # by definition) is read back by Get-ItemProperty as a NEGATIVE Int32,
+    # not the positive literal below - so the switch never matched a real
+    # registry-read value. Worse, [UInt32]$Code on that negative value
+    # actually throws (PowerShell's cast is checked, unlike C#'s unchecked
+    # cast), so this crashed outright for virtually any real error code.
+    # Masking through Int64 first reinterprets the same 32 bits as unsigned
+    # without the overflow check.
+    $unsignedCode = [uint32]([int64]$Code -band 0xFFFFFFFFL)
+    switch ($unsignedCode) {
         2147946825 { return 'ERROR_SECUREBOOT_NOT_ENABLED (0x80071149)' }
-        default    { return ('0x{0:X8}' -f ([UInt32]$Code)) }
+        default    { return ('0x{0:X8}' -f $unsignedCode) }
     }
 }
 
@@ -73,7 +82,11 @@ function Get-HexString {
     param([Nullable[Int32]]$Value)
 
     if ($null -eq $Value) { return $null }
-    return ('0x{0:X4}' -f ([UInt32]$Value))
+    # See Get-HResultText - [UInt32]$Value throws outright on a negative
+    # Int32 (e.g. any HRESULT failure code, which always has the high bit
+    # set). Masking through Int64 first reinterprets the same bits as
+    # unsigned without the overflow check.
+    return ('0x{0:X4}' -f ([uint32]([int64]$Value -band 0xFFFFFFFFL)))
 }
 
 # ----------------------------

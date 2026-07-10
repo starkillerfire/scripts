@@ -111,7 +111,12 @@ function Install-EdgeRemote {
             return
         }
 
-        & "$PSToolsPath\psexec.exe" -accepteula "\\$ComputerName" msiexec.exe /i "C:\Temp\$InstallerName" $Arguments 2>&1 | Out-Null
+        # $Arguments is one scalar string (e.g. '/qn /norestart'). Passed as
+        # a single token, PowerShell re-quotes it as ONE argument because it
+        # contains a space, so msiexec would receive "/qn /norestart" as a
+        # single unparseable switch instead of two. Splitting on whitespace
+        # passes each flag through as its own argument.
+        & "$PSToolsPath\psexec.exe" -accepteula "\\$ComputerName" msiexec.exe /i "C:\Temp\$InstallerName" ($Arguments -split '\s+') 2>&1 | Out-Null
         $rc = $LASTEXITCODE
 
         if ($rc -in @(0, 3010, 1641)) {
