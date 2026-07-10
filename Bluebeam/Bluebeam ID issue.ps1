@@ -19,9 +19,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Info($m){ Write-Host "[INFO] $m" }
-function Warn($m){ Write-Host "[WARN] $m" -ForegroundColor Yellow }
-function Ok($m){ Write-Host "[ OK ] $m" -ForegroundColor Green }
+function Write-Info($m){ Write-Host "[INFO] $m" }
+function Write-Warn($m){ Write-Host "[WARN] $m" -ForegroundColor Yellow }
+function Write-Ok($m){ Write-Host "[ OK ] $m" -ForegroundColor Green }
 
 # Prep working folder
 $Stamp   = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -35,9 +35,9 @@ New-Item -ItemType Directory -Force -Path $OutRoot,$LogsDir,$DiagDir,$EvtDir | O
 $RevuLogs = Join-Path $env:LOCALAPPDATA "Bluebeam\Revu\21\Logs"
 if (Test-Path $RevuLogs) {
   Copy-Item -Path (Join-Path $RevuLogs "*") -Destination $LogsDir -Recurse -Force -ErrorAction SilentlyContinue
-  Ok "Copied Bluebeam Revu logs from: $RevuLogs"
+  Write-Ok "Copied Bluebeam Revu logs from: $RevuLogs"
 } else {
-  Warn "Revu 21 log folder not found at $RevuLogs (open Revu → Preferences → Admin → Explore Log Folder to verify)."
+  Write-Warn "Revu 21 log folder not found at $RevuLogs (open Revu → Preferences → Admin → Explore Log Folder to verify)."
 }
 
 # Add a README with quick context
@@ -72,7 +72,7 @@ $capiEnabled = $false
 try {
   wevtutil sl "$capilog" /e:true | Out-Null
   $capiEnabled = $true
-  Ok "Enabled CAPI2 Operational logging."
+  Write-Ok "Enabled CAPI2 Operational logging."
 } catch { Warn "Could not enable CAPI2 logging (try running PowerShell as Administrator). Continuing." }
 
 try {
@@ -92,7 +92,7 @@ try {
 "@
     $evtx = Join-Path $EvtDir "CAPI2_Recent.evtx"
     wevtutil epl "$capilog" "$evtx" /q:"$Query" | Out-Null
-    Ok "Exported recent CAPI2 events → $evtx"
+    Write-Ok "Exported recent CAPI2 events → $evtx"
   } catch { Warn "CAPI2 export failed (insufficient rights or no events). You can export manually from Event Viewer." }
 } finally {
   # This is the only place CAPI2 logging gets turned back off, so it needs
@@ -152,14 +152,14 @@ if ($ClearUrlCache) {
     Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_clear.txt") "certutil.exe" "-URLcache * delete"
   } catch { Warn "Could not clear URL cache (non-fatal)." }
 } else {
-  Info "Skipping URL cache clear (pass -ClearUrlCache to force fresh revocation checks)."
+  Write-Info "Skipping URL cache clear (pass -ClearUrlCache to force fresh revocation checks)."
 }
 
 # 5) GPResult (to show no custom PKI policy)
 try {
   $rsop = Join-Path $DiagDir "gpresult.html"
   gpresult /h "$rsop" | Out-Null
-  Ok "Captured RSOP → $rsop"
+  Write-Ok "Captured RSOP → $rsop"
 } catch { Warn "gpresult failed (non-fatal)." }
 
 # 6) Zip it all up
@@ -167,9 +167,9 @@ $ZipPath = Join-Path $env:USERPROFILE ("Desktop\\Bluebeam_SupportBundle_$Stamp.z
 try {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   [System.IO.Compression.ZipFile]::CreateFromDirectory($OutRoot, $ZipPath)
-  Ok "Bundle created: $ZipPath"
+  Write-Ok "Bundle created: $ZipPath"
 } catch {
-  Warn "Could not create the ZIP bundle: $($_.Exception.Message). The collected files are still available, unzipped, at: $OutRoot"
+  Write-Warn "Could not create the ZIP bundle: $($_.Exception.Message). The collected files are still available, unzipped, at: $OutRoot"
 }
 Write-Host ""
 Write-Host "Attach this ZIP to your Bluebeam Support case."

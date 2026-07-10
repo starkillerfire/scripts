@@ -147,7 +147,7 @@ BEGIN {
             }
             else {
                 Write-Verbose "Installing Get-WindowsAutopilotInfo script..."
-                Install-Script -Name Get-WindowsAutopilotInfo -Force -ErrorAction Stop
+                Install-Script -Name Get-WindowsAutopilotInfo -MinimumVersion 3.9 -Force -ErrorAction Stop
                 Write-Verbose "Get-WindowsAutopilotInfo script installed successfully." 
             }
 
@@ -156,7 +156,7 @@ BEGIN {
             }
             else {
                 Write-Verbose "Installing PSWindowsUpdate module..."
-                Install-Module -Name PSWindowsUpdate -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+                Install-Module -Name PSWindowsUpdate -MinimumVersion 2.2.0.3 -Force -AllowClobber -Confirm:$false -ErrorAction Stop
                 Write-Verbose "PSWindowsUpdate module installed successfully."
             }
 
@@ -205,7 +205,7 @@ BEGIN {
                 }
                 else {
                     Write-Verbose "Installing Get-WindowsAutopilotInfo script..."
-                    Install-Script -Name Get-WindowsAutopilotInfo -Force -ErrorAction Stop
+                    Install-Script -Name Get-WindowsAutopilotInfo -MinimumVersion 3.9 -Force -ErrorAction Stop
                     Write-Verbose "Get-WindowsAutopilotInfo script installed successfully."
                 }
 
@@ -214,7 +214,7 @@ BEGIN {
                 }
                 else {
                     Write-Verbose "Installing PSWindowsUpdate module..."
-                    Install-Module -Name PSWindowsUpdate -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+                    Install-Module -Name PSWindowsUpdate -MinimumVersion 2.2.0.3 -Force -AllowClobber -Confirm:$false -ErrorAction Stop
                     Write-Verbose "PSWindowsUpdate module installed successfully."
                 }
 

@@ -66,7 +66,7 @@ try {
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
       }
     } catch {}
-    Install-Module -Name UniversalPrintManagement -Scope CurrentUser -Force
+    Install-Module -Name UniversalPrintManagement -MinimumVersion 1.0.7 -Scope CurrentUser -Force
   }
   Import-Module UniversalPrintManagement -ErrorAction Stop
 } catch {

@@ -1,4 +1,6 @@
-﻿<#
+﻿#Requires -RunAsAdministrator
+#Requires -Version 5.1
+<#
 .SYNOPSIS
     Dell Command | Update - Enterprise Automation (v6.5.0)
 

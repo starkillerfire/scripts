@@ -237,13 +237,13 @@ function Remove-BrPayload {
     Remove-Item $LocalDst -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable dstErr
     $realDstErr = $dstErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
     if ($realDstErr) {
-        LogMsg "WARNING: Failed to fully clean up '$LocalDst': $(($realDstErr.Exception.Message | Select-Object -Unique) -join '; ')"
+        Write-Log "WARNING: Failed to fully clean up '$LocalDst': $(($realDstErr.Exception.Message | Select-Object -Unique) -join '; ')"
     }
 
     Remove-Item "$LogRoot\$Env:COMPUTERNAME*" -Force -ErrorAction SilentlyContinue -ErrorVariable logErr
     $realLogErr = $logErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
     if ($realLogErr) {
-        LogMsg "WARNING: Failed to remove old log files under '$LogRoot': $(($realLogErr.Exception.Message | Select-Object -Unique) -join '; ')"
+        Write-Log "WARNING: Failed to remove old log files under '$LogRoot': $(($realLogErr.Exception.Message | Select-Object -Unique) -join '; ')"
     }
 }
 
@@ -259,11 +259,11 @@ function Install-BrCleanupTask {
 ########################################################################
 # -------------------------  Main execution ---------------------------#
 ########################################################################
-function ShowProg { param($s,$p) if(-not $Silent){Write-Progress -Activity 'BR Civil 3D' -Status $s -PercentComplete $p} }
+function Show-Progress { param($s,$p) if(-not $Silent){Write-Progress -Activity 'BR Civil 3D' -Status $s -PercentComplete $p} }
 
 $logRoot = "$Env:ProgramData\BR2023-Logs"
 New-Item $logRoot -ItemType Directory -Force -ea 0 | Out-Null
-function LogMsg { param($m) Add-Content (Join-Path $logRoot 'deploy.log') `
+function Write-Log { param($m) Add-Content (Join-Path $logRoot 'deploy.log') `
                   "$(Get-Date -f o) [$Env:COMPUTERNAME] $m" }
 
 $cfg = Get-BrConfig -Cli $PSBoundParameters
@@ -274,8 +274,8 @@ $copyArgs = @{
     LocalDst       = $cfg.LocalDst
     MinFreeGB      = $cfg.MinFreeGB
     LogRoot        = $logRoot
-    ProgressAction = ${function:ShowProg}
-    LogAction      = ${function:LogMsg}
+    ProgressAction = ${function:Show-Progress}
+    LogAction      = ${function:Write-Log}
 }
 if ($cfg.VerifyHash)  { $copyArgs['VerifyHash']  = $true }
 if ($cfg.UseBits)     { $copyArgs['UseBits']      = $true }
@@ -287,33 +287,33 @@ try {
     switch ($cfg.Mode) {
         'Cleanup' {
             Remove-BrPayload -LocalDst $cfg.LocalDst -LogRoot $logRoot
-            LogMsg 'Cleanup done'; ShowProg 'Cleanup' 100; exit 0
+            Write-Log 'Cleanup done'; Show-Progress 'Cleanup' 100; exit 0
         }
         'CopyOnly' {
             Copy-BrPayload @copyArgs
-            LogMsg 'Copy only done'
+            Write-Log 'Copy only done'
         }
         'ConfigOnly' {
             Invoke-BrConfig -LocalDst $cfg.LocalDst -Language $cfg.Language `
-                            -ProgressAction ${function:ShowProg} `
-                            -LogAction      ${function:LogMsg}
-            LogMsg 'Config only done'
+                            -ProgressAction ${function:Show-Progress} `
+                            -LogAction      ${function:Write-Log}
+            Write-Log 'Config only done'
         }
         'Full' {
             Copy-BrPayload @copyArgs -ErrorAction Stop
             Invoke-BrConfig -LocalDst $cfg.LocalDst -Language $cfg.Language `
-                            -ProgressAction ${function:ShowProg} `
-                            -LogAction      ${function:LogMsg} -ErrorAction Stop
-            LogMsg 'Full deploy done'
+                            -ProgressAction ${function:Show-Progress} `
+                            -LogAction      ${function:Write-Log} -ErrorAction Stop
+            Write-Log 'Full deploy done'
         }
     }
 
     if ($InstallCleanupTask) { Install-BrCleanupTask -ScriptPath $PSCommandPath }
-    ShowProg 'Done' 100
+    Show-Progress 'Done' 100
     exit 0
 }
 catch {
-    LogMsg "ERROR $($_.Exception.Message)"
+    Write-Log "ERROR $($_.Exception.Message)"
     Write-Error $_
     exit 1
 }

@@ -32,7 +32,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
     $needsPatch      = $false   # true only when manual base MSI path is taken
     $usedWinget      = $false
 
-    function TimeStamp ($msg) {
+    function Write-Log ($msg) {
         $ts = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
         Add-Content -Path $logPath -Value $ts -ErrorAction SilentlyContinue
         Write-Host $ts
@@ -75,7 +75,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
                 return
             } catch {
                 if ($i -eq $MaxAttempts) { throw }
-                TimeStamp "Download attempt $i of $MaxAttempts failed - retrying in 10s... ($_)"
+                Write-Log "Download attempt $i of $MaxAttempts failed - retrying in 10s... ($_)"
                 Start-Sleep 10
             }
         }
@@ -92,7 +92,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         $exited = $proc.WaitForExit($TimeoutSeconds * 1000)
         if (!$exited) {
             $proc.Kill()
-            TimeStamp "ERROR - '$FilePath' did not complete within ${TimeoutSeconds}s and was terminated."
+            Write-Log "ERROR - '$FilePath' did not complete within ${TimeoutSeconds}s and was terminated."
             return -1
         }
         return $proc.ExitCode
@@ -101,7 +101,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
     function Stop-AcrobatProcesses {
         $procs = Get-Process -Name 'Acrobat', 'AcroBroker', 'AcroRd32', 'AcroRd32Info' -ErrorAction SilentlyContinue
         if ($procs) {
-            TimeStamp "Stopping running Acrobat processes to avoid file locks..."
+            Write-Log "Stopping running Acrobat processes to avoid file locks..."
             $procs | Stop-Process -Force -ErrorAction SilentlyContinue
             # Wait up to 10s for actual termination rather than assuming a fixed sleep is enough
             $procs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
@@ -116,10 +116,10 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         if (!$disk) { return $true }   # can't determine; proceed optimistically
         $freeMB = [math]::Floor($disk.Free / 1MB)
         if ($freeMB -lt $RequiredMB) {
-            TimeStamp "ERROR - Insufficient disk space: ${freeMB}MB free on $drive, need ${RequiredMB}MB."
+            Write-Log "ERROR - Insufficient disk space: ${freeMB}MB free on $drive, need ${RequiredMB}MB."
             return $false
         }
-        TimeStamp "Disk space OK: ${freeMB}MB free on $drive (need ${RequiredMB}MB)."
+        Write-Log "Disk space OK: ${freeMB}MB free on $drive (need ${RequiredMB}MB)."
         return $true
     }
 
@@ -131,8 +131,8 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
 
     # Last-resort handler: logs the error location and exits cleanly so Intune sees a failure code
     trap {
-        TimeStamp "FATAL - Unhandled error: $_"
-        TimeStamp "  At: $($_.InvocationInfo.PositionMessage)"
+        Write-Log "FATAL - Unhandled error: $_"
+        Write-Log "  At: $($_.InvocationInfo.PositionMessage)"
         Exit-Script 1
     }
 
@@ -143,23 +143,23 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
 
     $isSystem   = [Security.Principal.WindowsIdentity]::GetCurrent().Name -eq 'NT AUTHORITY\SYSTEM'
     $runContext = if ($isSystem) { 'SYSTEM' } else { $env:USERNAME }
-    TimeStamp "=== $Software 64-bit deployment started on $env:COMPUTERNAME (context: $runContext) ==="
-    TimeStamp "Version before: $(Get-AcrobatVersion)"
+    Write-Log "=== $Software 64-bit deployment started on $env:COMPUTERNAME (context: $runContext) ==="
+    Write-Log "Version before: $(Get-AcrobatVersion)"
 
     # =========================================================
     # PRIMARY: winget
     # =========================================================
     $wingetExe = Get-WingetExe
     if ($wingetExe) {
-        TimeStamp "winget found at: $wingetExe"
+        Write-Log "winget found at: $wingetExe"
 
         # Refresh sources so stale package lists don't cause "not found" on long-idle machines
-        TimeStamp "Refreshing winget sources..."
+        Write-Log "Refreshing winget sources..."
         $srcExit = Invoke-Process -FilePath $wingetExe `
                    -ArgumentList @('source', 'update', '--disable-interactivity') `
                    -TimeoutSeconds 120
         if ($srcExit -ne 0) {
-            TimeStamp "WARNING - winget source update returned exit code $srcExit - continuing anyway."
+            Write-Log "WARNING - winget source update returned exit code $srcExit - continuing anyway."
         }
 
         $wingetLog  = Join-Path $workDir 'winget.log'
@@ -179,34 +179,34 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
 
         if ($acroInstalled) {
             # Upgrade path: exit 0 = upgraded; -1978335189 = already at latest version
-            TimeStamp "Existing install detected - attempting winget upgrade..."
+            Write-Log "Existing install detected - attempting winget upgrade..."
             $wgExit = Invoke-Process -FilePath $wingetExe `
                       -ArgumentList (@('upgrade') + $commonArgs) `
                       -TimeoutSeconds 1800
-            TimeStamp "winget upgrade exit code: $wgExit"
+            Write-Log "winget upgrade exit code: $wgExit"
             if ($wgExit -in @(0, -1978335189)) {
-                TimeStamp "winget upgrade succeeded."
+                Write-Log "winget upgrade succeeded."
                 $usedWinget = $true
             } else {
-                TimeStamp "winget upgrade failed (exit $wgExit) - will fall back to manual MSP patch."
+                Write-Log "winget upgrade failed (exit $wgExit) - will fall back to manual MSP patch."
                 $needsPatch = $true
             }
         } else {
             # Fresh install path
-            TimeStamp "No existing install - attempting winget install..."
+            Write-Log "No existing install - attempting winget install..."
             $wgExit = Invoke-Process -FilePath $wingetExe `
                       -ArgumentList (@('install') + $commonArgs) `
                       -TimeoutSeconds 1800
-            TimeStamp "winget install exit code: $wgExit"
+            Write-Log "winget install exit code: $wgExit"
             if ($wgExit -eq 0 -and (Test-Path $acroPath)) {
-                TimeStamp "winget install succeeded."
+                Write-Log "winget install succeeded."
                 $usedWinget = $true
             } else {
-                TimeStamp "winget install failed (exit $wgExit) - falling back to manual install."
+                Write-Log "winget install failed (exit $wgExit) - falling back to manual install."
             }
         }
     } else {
-        TimeStamp "winget not available - proceeding with manual install."
+        Write-Log "winget not available - proceeding with manual install."
     }
 
     # =========================================================
@@ -215,7 +215,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
     if (!$usedWinget -and !$needsPatch) {
 
         # ----------- prerequisite: VC++ 2013 x64 -----------
-        TimeStamp "Checking for Microsoft Visual C++ 2013 Redistributable (x64)..."
+        Write-Log "Checking for Microsoft Visual C++ 2013 Redistributable (x64)..."
         $vc2013 = @(
             Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' `
@@ -226,27 +226,27 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         if (!$vc2013) {
             $vcUrl  = 'https://download.microsoft.com/download/2/E/6/2E61CFA4-993B-4DD4-91DA-3737CD5CD6E3/vcredist_x64.exe'
             $vcFile = Join-Path $workDir 'vcredist_x64_2013.exe'
-            TimeStamp "Downloading VC++ 2013 x64..."
+            Write-Log "Downloading VC++ 2013 x64..."
             try { Invoke-Download -Uri $vcUrl -OutFile $vcFile }
-            catch { TimeStamp "ERROR downloading VC++ 2013: $_"; Exit-Script 1 }
+            catch { Write-Log "ERROR downloading VC++ 2013: $_"; Exit-Script 1 }
 
             $vcSig = Get-AuthenticodeSignature -FilePath $vcFile
             if ($vcSig.Status -ne 'Valid' -or $vcSig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
-                TimeStamp "ERROR - VC++ redistributable failed Authenticode validation (status: $($vcSig.Status)) - refusing to run it."
+                Write-Log "ERROR - VC++ redistributable failed Authenticode validation (status: $($vcSig.Status)) - refusing to run it."
                 Exit-Script 1
             }
-            TimeStamp "Installing VC++ 2013 x64..."
+            Write-Log "Installing VC++ 2013 x64..."
             $vcExit = Invoke-Process -FilePath $vcFile -ArgumentList '/install /quiet /norestart' -TimeoutSeconds 300
             if ($vcExit -notin @(0, 3010)) {
-                TimeStamp "WARNING - VC++ 2013 install returned exit code $vcExit."
+                Write-Log "WARNING - VC++ 2013 install returned exit code $vcExit."
             }
         } else {
-            TimeStamp "VC++ 2013 x64 already present (v$($vc2013[0].DisplayVersion))."
+            Write-Log "VC++ 2013 x64 already present (v$($vc2013[0].DisplayVersion))."
         }
 
         # ----------- install base Acrobat if absent -----------
         if (Test-Path $acroPath) {
-            TimeStamp "Found existing Acrobat - will apply MSP patch."
+            Write-Log "Found existing Acrobat - will apply MSP patch."
             $needsPatch = $true
         } else {
             # Query registry directly - avoids Win32_Product which triggers MSI repair on every installed app
@@ -261,7 +261,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
             )
 
             if ($legacy) {
-                TimeStamp "Uninstalling legacy 32-bit Acrobat before 64-bit deployment..."
+                Write-Log "Uninstalling legacy 32-bit Acrobat before 64-bit deployment..."
                 foreach ($app in $legacy) {
                     $guid = [regex]::Match($app.UninstallString, '\{[0-9A-F\-]+\}').Value
                     if ($guid) {
@@ -270,7 +270,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
                                   -TimeoutSeconds 600
                         # 1605 = product not registered (already removed); treat as success
                         if ($unExit -notin @(0, 3010, 1605)) {
-                            TimeStamp "WARNING - Legacy uninstall of $guid returned exit code $unExit."
+                            Write-Log "WARNING - Legacy uninstall of $guid returned exit code $unExit."
                         }
                     }
                 }
@@ -281,33 +281,33 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
 
             $zipUrl  = 'https://ardownload3.adobe.com/pub/adobe/acrobat/win/AcrobatDC/Acrobat_Pro_x64_Web_WWMUI.zip'
             $zipFile = Join-Path $workDir 'Acrobat_Pro_x64_Web_WWMUI.zip'
-            TimeStamp "Downloading Acrobat 64-bit base media..."
+            Write-Log "Downloading Acrobat 64-bit base media..."
             try { Invoke-Download -Uri $zipUrl -OutFile $zipFile }
-            catch { TimeStamp "ERROR downloading Acrobat base media: $_"; Exit-Script 1 }
+            catch { Write-Log "ERROR downloading Acrobat base media: $_"; Exit-Script 1 }
 
-            TimeStamp "Extracting base media..."
+            Write-Log "Extracting base media..."
             try {
                 Expand-Archive -LiteralPath $zipFile -DestinationPath $workDir -Force -ErrorAction Stop
             } catch {
-                TimeStamp "ERROR extracting base media: $_"; Exit-Script 1
+                Write-Log "ERROR extracting base media: $_"; Exit-Script 1
             }
 
             $msi = Get-ChildItem $workDir -Recurse -Filter 'AcroPro.msi' | Select-Object -First 1
-            if (!$msi) { TimeStamp "ERROR - AcroPro.msi not found after extraction."; Exit-Script 1 }
+            if (!$msi) { Write-Log "ERROR - AcroPro.msi not found after extraction."; Exit-Script 1 }
 
             $msiSig = Get-AuthenticodeSignature -FilePath $msi.FullName
             if ($msiSig.Status -ne 'Valid' -or $msiSig.SignerCertificate.Subject -notmatch 'O=Adobe') {
-                TimeStamp "ERROR - AcroPro.msi failed Authenticode validation (status: $($msiSig.Status)) - refusing to install it."
+                Write-Log "ERROR - AcroPro.msi failed Authenticode validation (status: $($msiSig.Status)) - refusing to install it."
                 Exit-Script 1
             }
 
             Stop-AcrobatProcesses
-            TimeStamp "Installing Acrobat 64-bit base (silent)..."
+            Write-Log "Installing Acrobat 64-bit base (silent)..."
             $msiExit = Invoke-Process -FilePath 'msiexec.exe' `
                        -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /l*v `"$logPath`"" `
                        -TimeoutSeconds 1800
             if ($msiExit -notin @(0, 3010, 1641)) {
-                TimeStamp "ERROR - Base install failed with exit code $msiExit."; Exit-Script 1
+                Write-Log "ERROR - Base install failed with exit code $msiExit."; Exit-Script 1
             }
             $needsPatch = $true
         }
@@ -318,25 +318,25 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         Stop-AcrobatProcesses
 
         $relUrl = 'https://www.adobe.com/devnet-docs/acrobatetk/tools/ReleaseNotesDC/continuous/index.html'
-        TimeStamp "Querying Adobe release notes for latest x64 patch..."
+        Write-Log "Querying Adobe release notes for latest x64 patch..."
         try {
             $html = Invoke-WebRequest -Uri $relUrl -UseBasicParsing -ErrorAction Stop |
                     Select-Object -ExpandProperty Content
         } catch {
-            TimeStamp "ERROR querying Adobe release notes: $_"; Exit-Script 1
+            Write-Log "ERROR querying Adobe release notes: $_"; Exit-Script 1
         }
 
         $m = [regex]::Matches($html, 'https://ardownload3\.adobe\.com[^"]+AcrobatDCx64Upd(?<ver>\d{10})\.msp')
-        if ($m.Count -eq 0) { TimeStamp "No x64 MSP link found - aborting update."; Exit-Script 1 }
+        if ($m.Count -eq 0) { Write-Log "No x64 MSP link found - aborting update."; Exit-Script 1 }
 
         $latest  = $m | Sort-Object { $_.Groups['ver'].Value } -Descending | Select-Object -First 1
         $mspUrl  = $latest.Value
         $mspVer  = $latest.Groups['ver'].Value
         $mspPath = Join-Path $workDir "AcrobatDCx64Upd${mspVer}.msp"
 
-        TimeStamp "Latest patch identified: $mspVer - downloading..."
+        Write-Log "Latest patch identified: $mspVer - downloading..."
         try { Invoke-Download -Uri $mspUrl -OutFile $mspPath }
-        catch { TimeStamp "ERROR downloading patch: $_"; Exit-Script 1 }
+        catch { Write-Log "ERROR downloading patch: $_"; Exit-Script 1 }
 
         # MSP patches aren't always Authenticode-signed by Adobe the way
         # the base MSI is, so this can't hard-fail on "NotSigned" the way
@@ -346,32 +346,32 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         # signature is a clear tamper signal worth stopping on.
         $mspSig = Get-AuthenticodeSignature -FilePath $mspPath
         if ($mspSig.Status -eq 'NotSigned') {
-            TimeStamp "WARNING - MSP patch $mspVer has no Authenticode signature to verify. Proceeding, but consider validating this download out-of-band."
+            Write-Log "WARNING - MSP patch $mspVer has no Authenticode signature to verify. Proceeding, but consider validating this download out-of-band."
         } elseif ($mspSig.Status -ne 'Valid' -or $mspSig.SignerCertificate.Subject -notmatch 'O=Adobe') {
-            TimeStamp "ERROR - MSP patch failed Authenticode validation (status: $($mspSig.Status)) - refusing to apply it."
+            Write-Log "ERROR - MSP patch failed Authenticode validation (status: $($mspSig.Status)) - refusing to apply it."
             Exit-Script 1
         }
 
-        TimeStamp "Applying patch $mspVer..."
+        Write-Log "Applying patch $mspVer..."
         $patchExit = Invoke-Process -FilePath 'msiexec.exe' `
                      -ArgumentList "/update `"$mspPath`" /qn /norestart /l*v `"$logPath`"" `
                      -TimeoutSeconds 1800
         switch ($patchExit) {
-            0       { TimeStamp "Patch applied successfully." }
-            3010    { TimeStamp "Patch applied - reboot required (3010)." }
-            1641    { TimeStamp "Patch applied - installer initiated reboot (1641)." }
-            default { TimeStamp "ERROR - Patch failed with exit code $patchExit."; Exit-Script 1 }
+            0       { Write-Log "Patch applied successfully." }
+            3010    { Write-Log "Patch applied - reboot required (3010)." }
+            1641    { Write-Log "Patch applied - installer initiated reboot (1641)." }
+            default { Write-Log "ERROR - Patch failed with exit code $patchExit."; Exit-Script 1 }
         }
     }
 
     # Verify the executable is present before declaring success
     if (!(Test-Path $acroPath)) {
-        TimeStamp "ERROR - Deployment completed but Acrobat.exe not found. Installation may have failed."
+        Write-Log "ERROR - Deployment completed but Acrobat.exe not found. Installation may have failed."
         Exit-Script 1
     }
 
     $method = if ($usedWinget) { 'winget' } else { 'manual' }
-    TimeStamp "Version after:  $(Get-AcrobatVersion)"
-    TimeStamp "Cleaning up temp files..."
-    TimeStamp "=== Deployment finished (via $method) on $env:COMPUTERNAME ==="
+    Write-Log "Version after:  $(Get-AcrobatVersion)"
+    Write-Log "Cleaning up temp files..."
+    Write-Log "=== Deployment finished (via $method) on $env:COMPUTERNAME ==="
     Exit-Script 0

@@ -148,7 +148,7 @@ $ErrorActionPreference = 'Stop'
 
 # ---- lightweight local log helper ----
 $localLog = "$env:SystemRoot\Temp\WinUpdateSweep_$env:COMPUTERNAME.log"
-function Log([string]$m){ (Get-Date -Format 's') + '  ' + $m | Add-Content $localLog }
+function Write-Log([string]$m){ (Get-Date -Format 's') + '  ' + $m | Add-Content $localLog }
 
 # ---- transcript ----
 $trans = "$env:SystemRoot\Temp\WUTranscript_$([guid]::NewGuid()).log"
@@ -168,7 +168,7 @@ reg.exe export $wuKeyPath $bkBefore /y | Out-Null
 # abort this whole remote payload under $ErrorActionPreference = 'Stop').
 $bkBeforeOk = ($LASTEXITCODE -eq 0) -and (Test-Path $bkBefore)
 if (-not $bkBeforeOk) {
-    Log "WARNING: could not export '$wuKeyPath' before the MU flip (key may not exist) - WSUS rollback will be skipped for this node."
+    Write-Log "WARNING: could not export '$wuKeyPath' before the MU flip (key may not exist) - WSUS rollback will be skipped for this node."
 }
 
 # ---- module pin ----
@@ -201,19 +201,19 @@ $updates  = Get-WindowsUpdate -Criteria $criteria -Category $cats -MicrosoftUpda
             Where-Object $filterScript
 
 if ($updates) {
-    Log "Installing $($updates.Count) update(s)…"
+    Write-Log "Installing $($updates.Count) update(s)…"
     $updates | Install-WindowsUpdate -AcceptAll -IgnoreReboot -MicrosoftUpdate `
               -Verbose:$false -ErrorAction Continue
-    Log "Installed $($updates.Count) update(s)"
+    Write-Log "Installed $($updates.Count) update(s)"
 } else {
-    Log "No updates required"
+    Write-Log "No updates required"
 }
 
 # ---- reboot if needed ----
 if ((Get-WURebootStatus).RebootNeeded) {
-    Log "Pending reboot"
+    Write-Log "Pending reboot"
     if ($SuppressReboot) {
-        Log "Reboot suppressed by -NoAutoReboot - node stays pending until the offline catch-up task or a manual restart."
+        Write-Log "Reboot suppressed by -NoAutoReboot - node stays pending until the offline catch-up task or a manual restart."
     } else {
         shutdown /r /t 30 /c "PatchSweep updates"
     }
@@ -232,16 +232,16 @@ if ((Get-WURebootStatus).RebootNeeded) {
 reg.exe export $wuKeyPath $bkAfter /y | Out-Null
 if ($bkBeforeOk) {
     reg.exe import $bkBefore | Out-Null
-    if ($LASTEXITCODE -ne 0) { Log "WARNING: reg.exe import of pre-flip WindowsUpdate settings failed (exit $LASTEXITCODE)." }
+    if ($LASTEXITCODE -ne 0) { Write-Log "WARNING: reg.exe import of pre-flip WindowsUpdate settings failed (exit $LASTEXITCODE)." }
 } else {
-    Log "Skipping WSUS rollback import - no pre-flip backup was captured."
+    Write-Log "Skipping WSUS rollback import - no pre-flip backup was captured."
 }
 gpupdate /target:computer /force /wait:0 | Out-Null
 
 # ---- registry diff ----
 if ($bkBeforeOk -and (Test-Path $bkAfter)) {
     $diff = Compare-Object (Get-Content $bkBefore) (Get-Content $bkAfter)
-    if ($diff) { Log "WU registry diff:`n$($diff | Out-String)" }
+    if ($diff) { Write-Log "WU registry diff:`n$($diff | Out-String)" }
 }
 
 # ---- offline catch-up task ----
