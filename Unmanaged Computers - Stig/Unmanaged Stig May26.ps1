@@ -59,14 +59,17 @@
 #                                                   built-in account rename
 #   BitLocker, Time & LAPS ........................ Invoke-BitLockerRemediation, Set-StigWindowsTime, LAPS policy processing
 #   Interactive Menu .............................. Read-StigYesNo, Invoke-StigInteractiveMenu
-#   System Readiness & Local Admin Review ........ Invoke-StigSystemReadiness, Invoke-LocalAdminGroupReview
+#   System Readiness & Local Admin Review ........ Install-PowerStigModule (PowerSTIG module install/verify, run up
+#                                                   front here so it's checked before remediation), Invoke-StigSystemReadiness,
+#                                                   Invoke-LocalAdminGroupReview
 #   Reporting Helpers ............................. certificate/firewall-preview reports, post-reboot resume script,
 #                                                   operator summary, USB export
 #   Backup ......................................... Export-StigBackup (registry/secedit/audit/firewall/service/inventory)
 #   SCAP/XCCDF XML Import & OVAL Interpretation ... XML node helpers, benchmark version detection, SCAP XML signature
 #                                                   verification (Test-ScapXmlSignature), Import-ScapContent, OVAL lookups
 #   SCAP-Driven Remediation ....................... registry + audit policy actions derived directly from the loaded SCAP XML
-#   PowerSTIG / Local Policy / Hard-Coded Remediation .. PowerSTIG DSC baseline, local security policy, hard-coded registry
+#   PowerSTIG / Local Policy / Hard-Coded Remediation .. PowerSTIG DSC baseline (module install itself now lives in
+#                                                   Install-PowerStigModule above), local security policy, hard-coded registry
 #                                                   fallbacks, and the per-category remediation orchestrators
 #   Rule Targeting & Assessment-Result Helpers ... CKL/XCCDF/CSV import, which rule IDs are in scope for this run
 #   Validation, Coverage Reporting & Summary ...... post-remediation validation, coverage CSV/report, final operator summary
@@ -995,6 +998,51 @@ function Invoke-StigInteractiveMenu {
 #endregion Interactive Menu
 
 #region System Readiness & Local Admin Review
+function Install-PowerStigModule {
+    <#
+    .SYNOPSIS
+        Ensures the PowerSTIG module (and its RequiredModules) are installed,
+        caching the result in $script:PowerStigModule so later callers (the
+        DSC baseline) don't re-check/re-install what readiness already did.
+    .DESCRIPTION
+        Split out of Invoke-PowerStigBaseline so it can run as part of
+        Invoke-StigSystemReadiness, up front, before any remediation -
+        letting an air-gapped/unmanaged machine with no PSGallery access
+        fail fast and visibly in the readiness report instead of only
+        surfacing the problem deep into the remediation run.
+    #>
+    if ($SkipPowerSTIG) {
+        Add-OutstandingItem 'PowerSTIG module install/verification was skipped (-SkipPowerSTIG). PowerSTIG DSC baseline remediation will not run.'
+        return $null
+    }
+    if ($script:PowerStigModule) { return $script:PowerStigModule }
+
+    $psStigModule = Get-Module -ListAvailable -Name PowerSTIG | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $psStigModule) {
+        try {
+            Install-PackageProvider -Name NuGet -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Install-Module -Name PowerSTIG -Scope AllUsers -Force -ErrorAction Stop
+        }
+        catch {
+            Add-OutstandingItem "PowerSTIG could not be installed. Manual/SCAP-driven remediations continued. $($_.Exception.Message)"
+        }
+        $psStigModule = Get-Module -ListAvailable -Name PowerSTIG | Sort-Object Version -Descending | Select-Object -First 1
+    }
+
+    if (-not $psStigModule) { return $null }
+
+    foreach ($required in $psStigModule.RequiredModules) {
+        if (-not (Get-Module -ListAvailable -Name $required.Name)) {
+            try { Install-Module -Name $required.Name -Scope AllUsers -Force -ErrorAction Stop }
+            catch { Add-OutstandingItem "Failed to install PowerSTIG dependency $($required.Name): $($_.Exception.Message)" }
+        }
+    }
+
+    $script:PowerStigModule = $psStigModule
+    return $psStigModule
+}
+
 function Invoke-StigSystemReadiness {
     param([Parameter(Mandatory)][string]$OutputRoot)
 
@@ -1043,6 +1091,9 @@ function Invoke-StigSystemReadiness {
         $vbsState = "SecurityServicesConfigured=$($dg.SecurityServicesConfigured -join ','); SecurityServicesRunning=$($dg.SecurityServicesRunning -join ','); VirtualizationBasedSecurityStatus=$($dg.VirtualizationBasedSecurityStatus)"
     } catch { $vbsState = 'Unknown or namespace unavailable' }
 
+    $powerStigModule = Install-PowerStigModule
+    $powerStigStatus = if ($SkipPowerSTIG) { 'Skipped (-SkipPowerSTIG)' } elseif ($powerStigModule) { "Installed ($($powerStigModule.Version))" } else { 'Not installed' }
+
     $row = [pscustomobject]@{
         ComputerName       = $env:COMPUTERNAME
         UserContext        = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -1061,6 +1112,7 @@ function Invoke-StigSystemReadiness {
         TpmReady           = $tpmReady
         BitLockerSystem    = $bitLockerStatus
         VBSDeviceGuard     = $vbsState
+        PowerSTIGStatus    = $powerStigStatus
         PowerShellVersion  = $PSVersionTable.PSVersion.ToString()
         ScapXml            = $script:LoadedScapXmlPath
         BenchmarkVersion   = $script:BenchmarkVersionText
@@ -1080,6 +1132,7 @@ function Invoke-StigSystemReadiness {
         "TPM present/ready: $($row.TpmPresent) / $($row.TpmReady)",
         "BitLocker system drive: $($row.BitLockerSystem)",
         "VBS/Device Guard: $($row.VBSDeviceGuard)",
+        "PowerSTIG module: $powerStigStatus",
         "SCAP XML: $($script:LoadedScapXmlPath)",
         "Benchmark version: $($script:BenchmarkVersionText)",
         "Detail CSV: $detailPath"
@@ -2141,28 +2194,13 @@ function Invoke-PowerStigBaseline {
     }
     catch { Add-OutstandingItem "WinRM setup for DSC push failed: $($_.Exception.Message)" }
 
-    $psStigModule = Get-Module -ListAvailable -Name PowerSTIG | Sort-Object Version -Descending | Select-Object -First 1
-    if (-not $psStigModule) {
-        try {
-            Install-PackageProvider -Name NuGet -Force -ErrorAction SilentlyContinue | Out-Null
-            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-            Install-Module -Name PowerSTIG -Scope AllUsers -Force -ErrorAction Stop
-        }
-        catch {
-            Add-OutstandingItem "PowerSTIG could not be installed. Manual/SCAP-driven remediations continued. $($_.Exception.Message)"
-        }
-        $psStigModule = Get-Module -ListAvailable -Name PowerSTIG | Sort-Object Version -Descending | Select-Object -First 1
-    }
-
+    # Readiness (Invoke-StigSystemReadiness) already installs/verifies
+    # PowerSTIG and its RequiredModules up front and caches the result in
+    # $script:PowerStigModule; this just picks that up (or installs now, if
+    # readiness was skipped via -SkipSystemReadiness).
+    $psStigModule = Install-PowerStigModule
     if (-not $psStigModule) { return }
     Import-Module PowerSTIG -ErrorAction Stop
-
-    foreach ($required in $psStigModule.RequiredModules) {
-        if (-not (Get-Module -ListAvailable -Name $required.Name)) {
-            try { Install-Module -Name $required.Name -Scope AllUsers -Force -ErrorAction Stop }
-            catch { Add-OutstandingItem "Failed to install PowerSTIG dependency $($required.Name): $($_.Exception.Message)" }
-        }
-    }
 
     if ($OrgSettingsPath) {
         if (-not (Test-Path -LiteralPath $OrgSettingsPath)) { throw "Specified OrgSettingsPath '$OrgSettingsPath' was not found." }
@@ -2185,28 +2223,48 @@ function Invoke-PowerStigBaseline {
     $m2 = [regex]::Match((Split-Path -Leaf $orgDefault), 'WindowsClient-11-(?<ver>[0-9\.]+)\.org\.default\.xml', 'IgnoreCase')
     if ($m2.Success) { $stigVersion = $m2.Groups['ver'].Value }
 
-    [DSCLocalConfigurationManager()]
-    Configuration LCM_PushConfig {
-        Node 'localhost' {
-            Settings {
-                ConfigurationMode    = 'ApplyAndAutoCorrect'
-                AllowModuleOverwrite = $true
-                RefreshMode          = 'Push'
-                RebootNodeIfNeeded   = $true
-            }
+    # The two Configuration blocks below are built as a STRING and parsed
+    # via Invoke-Expression rather than being written as literal Configuration
+    # keywords in this script's own source. PowerShell resolves
+    # "Import-DscResource -ModuleName PowerSTIG" at PARSE time for a literal
+    # Configuration block - meaning this entire script would fail to even
+    # load ("Could not find the module 'PowerSTIG'") on any machine where
+    # PowerSTIG isn't already installed, before the Install-Module logic
+    # above ever got a chance to run. That defeats the whole point of this
+    # script installing its own PowerSTIG dependency on a fresh, unmanaged
+    # machine. Deferring the parse to this string - reached only after
+    # $psStigModule is confirmed present, a few lines above - fixes that.
+    $dscConfigText = @'
+[DSCLocalConfigurationManager()]
+Configuration LCM_PushConfig {
+    Node 'localhost' {
+        Settings {
+            ConfigurationMode    = 'ApplyAndAutoCorrect'
+            AllowModuleOverwrite = $true
+            RefreshMode          = 'Push'
+            RebootNodeIfNeeded   = $true
         }
     }
+}
 
-    Configuration Win11_STIG_Baseline {
-        param([Parameter(Mandatory)][string]$OrgSettings, [Parameter(Mandatory)][string]$StigVersion)
-        Import-DscResource -ModuleName PowerSTIG
-        Node 'localhost' {
-            WindowsClient STIGBaseline {
-                OsVersion   = '11'
-                StigVersion = $StigVersion
-                OrgSettings = $OrgSettings
-            }
+Configuration Win11_STIG_Baseline {
+    param([Parameter(Mandatory)][string]$OrgSettings, [Parameter(Mandatory)][string]$StigVersion)
+    Import-DscResource -ModuleName PowerSTIG
+    Node 'localhost' {
+        WindowsClient STIGBaseline {
+            OsVersion   = '11'
+            StigVersion = $StigVersion
+            OrgSettings = $OrgSettings
         }
+    }
+}
+'@
+    try {
+        Invoke-Expression $dscConfigText
+    }
+    catch {
+        Add-OutstandingItem "Failed to parse the PowerSTIG DSC configuration: $($_.Exception.Message)"
+        return
     }
 
     $lcmPath = Join-Path $env:ProgramData 'PowerSTIG\LCM'
