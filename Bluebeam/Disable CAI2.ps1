@@ -7,6 +7,9 @@
   once Bluebeam / TSA testing is complete.
 #>
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 # --- Require Administrator ---------------------------------------------------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {

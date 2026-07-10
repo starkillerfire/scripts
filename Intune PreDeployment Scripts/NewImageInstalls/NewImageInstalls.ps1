@@ -5,6 +5,8 @@ param (
     [string]$Channel      = "Stable"
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # speeds up Invoke-WebRequest downloads
 
 function Test-DownloadedInstallerSignature {

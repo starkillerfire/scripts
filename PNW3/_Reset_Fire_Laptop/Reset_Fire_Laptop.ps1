@@ -88,7 +88,7 @@ function Stop-ProcessAndWait {
     param([string]$Name)
     $proc = Get-Process $Name -ErrorAction SilentlyContinue
     if ($proc) {
-        $proc | Stop-Process -Force
+        $proc | Stop-Process -Force -ErrorAction SilentlyContinue
         $proc | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
         Write-Host "$Name processes stopped..." -ForegroundColor Green
     }

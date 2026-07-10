@@ -20,6 +20,9 @@ param(
   [switch]$ForceSwitchAccount
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
   Write-Warning "UniversalPrintManagement targets Windows PowerShell 5.1 (Desktop). You're running: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion)"
 }

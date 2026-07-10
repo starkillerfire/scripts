@@ -28,6 +28,9 @@ param(
     [string]$TicketReference = ""
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 $RegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
 $LogPath      = "C:\ProgramData\Logs\RedLion-HVCI-Disable.log"
 $EventSource  = "RedLion-HVCI"

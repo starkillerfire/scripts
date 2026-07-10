@@ -30,6 +30,9 @@ param(
     [switch]$Force
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 # ── Auto-elevation: relaunch as admin if needed ──────────────────────────────────
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
                [Security.Principal.WindowsBuiltInRole]::Administrator)
