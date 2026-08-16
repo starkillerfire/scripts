@@ -9,6 +9,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # speeds up Invoke-WebRequest downloads
 
+# Set by the Install-* functions below when an msiexec/installer exit code
+# of 3010 or 1641 (success, reboot required) is seen, so the final exit code
+# can reflect it instead of collapsing every non-hard-failure outcome to 0.
+$script:AnyRebootNeeded = $false
+
 function Test-DownloadedInstallerSignature {
     <#
     .SYNOPSIS
@@ -41,6 +46,7 @@ function Install-Chrome {
         if ($proc.ExitCode -notin @(0, 3010, 1641)) {
             throw "msiexec exited $($proc.ExitCode)"
         }
+        if ($proc.ExitCode -in @(3010, 1641)) { $script:AnyRebootNeeded = $true }
         Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
         return $true
     } catch {
@@ -84,6 +90,7 @@ function Install-Edge {
         if ($proc.ExitCode -notin @(0, 3010, 1641)) {
             throw "msiexec exited $($proc.ExitCode)"
         }
+        if ($proc.ExitCode -in @(3010, 1641)) { $script:AnyRebootNeeded = $true }
         Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
         return $true
     } catch {
@@ -107,6 +114,7 @@ function Install-DotNet {
             Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Microsoft Corporation'
             $proc = Start-Process -Wait -FilePath $path -ArgumentList '/install','/quiet','/norestart' -PassThru
             if ($proc.ExitCode -notin @(0, 3010)) { throw "Installer exited $($proc.ExitCode)" }
+            if ($proc.ExitCode -eq 3010) { $script:AnyRebootNeeded = $true }
             Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
             return $true
         } catch {
@@ -133,6 +141,7 @@ function Install-DCU {
             # /s = silent, /l = log path
             $proc = Start-Process -Wait -FilePath $path -ArgumentList '/s',"/l=$PSScriptRoot\dcu-install.log" -PassThru
             if ($proc.ExitCode -notin @(0, 3010)) { throw "Installer exited $($proc.ExitCode)" }
+            if ($proc.ExitCode -eq 3010) { $script:AnyRebootNeeded = $true }
             Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
             return $true
         } catch {
@@ -159,5 +168,10 @@ if ($failedComponents) {
     Write-Output ""
     Write-Output "One or more components failed to install: $($failedComponents -join ', ')"
     exit 1
+}
+if ($script:AnyRebootNeeded) {
+    Write-Output ""
+    Write-Output "One or more components installed successfully but require a reboot."
+    exit 3010
 }
 exit 0

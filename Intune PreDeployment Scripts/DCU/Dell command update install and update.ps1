@@ -45,7 +45,15 @@ param(
 )
 
 # ─── PREAMBLE ────────────────────────────────────────────────────────────────
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 $Version = '6.5.0'
+
+# Don't rely on the OS/.NET default protocol for the dl.dell.com /
+# downloads3.dell.com downloads below - freshly-imaged machines may not yet
+# default to TLS 1.2.
+if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
 
 if ($SelfHostPwsh7 -and $PSVersionTable.PSVersion.Major -lt 7) {
     if ($pwsh = Get-Command pwsh.exe -EA 0) { & $pwsh.Path -File $PSCommandPath @PSBoundParameters; exit }
@@ -55,7 +63,11 @@ $timer = [Diagnostics.Stopwatch]::StartNew()
 $mutex = [Threading.Mutex]::new($true,'Global\DCUUpdateLock',[ref]$lock)
 if (-not $lock) { Write-Host 'Another instance is running.'; exit 255 }
 Register-EngineEvent PowerShell.Exiting -Action {
-        try { Stop-Transcript -EA 0 } catch {}
+        # Write-Host/-Warning (not Write-Log) deliberately here: this handler
+        # can fire on an unhandled terminating error raised before Write-Log
+        # is defined below (e.g. the disk-space check just after this
+        # registration), so it can't depend on that function existing yet.
+        try { Stop-Transcript -EA 0 } catch { Write-Warning "Stop-Transcript failed during exit cleanup: $($_.Exception.Message)" }
         # This is a safety-net release for exits that skip past the normal
         # end-of-script $mutex.ReleaseMutex() call below (Ctrl+C, an
         # unexpected terminating error, etc.). On a normal run, that call
@@ -63,7 +75,7 @@ Register-EngineEvent PowerShell.Exiting -Action {
         # ReleaseMutex() on an already-released mutex throws - harmless to
         # the exit code by this point, but a confusing stray error during
         # shutdown otherwise.
-        try { $mutex.ReleaseMutex() } catch {}
+        try { $mutex.ReleaseMutex() } catch { Write-Warning "ReleaseMutex failed during exit cleanup (expected if already released): $($_.Exception.Message)" }
 } | Out-Null
 
 if ((Get-PSDrive C).Free/1MB -lt 1024) { throw 'Need ≥1 GB free on C:' }
@@ -77,11 +89,19 @@ if (-not (Get-Module PSFramework -ListAvailable -EA 0)) {
     Install-Module PSFramework -RequiredVersion 1.6.224 -Scope AllUsers -Force -EA 0
 }
 Import-Module PSFramework -EA 0
+# Install/Import above are both -EA 0 (offline machines with no PSGallery
+# access shouldn't hard-fail this script just for its own debug logging) -
+# but Write-Log used to call Write-PSFMessage unconditionally, so on exactly
+# that offline case it called an undefined function and every run failed
+# before doing any real work, scheduling a RunOnce retry that would fail the
+# same way. Now it only calls into PSFramework if the module actually loaded;
+# otherwise it silently falls back to the local JSONL log.
+$script:PSFrameworkAvailable = [bool](Get-Module PSFramework -EA 0)
 $JsonLog = Join-Path $LogRoot 'run.jsonl'
 function Write-Log {
     param([string]$Message,[ValidateSet('INFO','WARN','ERROR','DEBUG')]$Level='INFO')
     if ($Level -eq 'DEBUG' -and -not $DebugLog) { return }
-    Write-PSFMessage -Level $Level -Message $Message -Target 'DCU-Auto'
+    if ($script:PSFrameworkAvailable) { Write-PSFMessage -Level $Level -Message $Message -Target 'DCU-Auto' }
     @{ts=(Get-Date -Format o);level=$Level;msg=$Message}|ConvertTo-Json -Compress >> $JsonLog
 }
 Write-Log "DCU script version $Version" 'DEBUG'
@@ -339,7 +359,12 @@ try {
         }
         Import-Module PSWindowsUpdate -EA Stop
         Install-WindowsUpdate -AcceptAll -AutoReboot:$false -EA Stop
-        exit
+        # Was a bare `exit`, relying on whatever $LASTEXITCODE happened to be
+        # rather than an intentional code. Reaching this line means the
+        # Windows Update fallback above completed without throwing (-EA Stop
+        # would have hit the outer catch otherwise), so 0 is the correct,
+        # deliberate exit code.
+        exit 0
     }
 
     Test-DCUConnectivity

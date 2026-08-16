@@ -12,11 +12,21 @@ param(
     [string]$LogEndpoint = '',
     [switch]$WingetCatchUp,
     [switch]$IgnoreBattery,
-    [switch]$EnableVerbose
+    [switch]$EnableVerbose,
+    # When set, a pending reboot registers the resume task (so the update
+    # loop still continues after whatever reboot eventually happens) and
+    # exits 3010 instead of calling Restart-Computer -Force. Needed when this
+    # script is launched as a waited child process (e.g. by
+    # MasterInstaller.ps1) - an immediate forced reboot previously killed the
+    # parent mid-run, before it could finalize its own summary/transcript.
+    [switch]$NoImmediateReboot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Set before the self-update download below (previously this only happened
+# later, after that download had already run unprotected).
+if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
 $VerbosePreference = if ($EnableVerbose.IsPresent) { 'Continue' } else { 'SilentlyContinue' }
 $script:HadErrors = $false
 $script:Skipped = $false
@@ -35,7 +45,7 @@ if (Test-Path $ConfigPath) {
         foreach ($prop in $cfg.PSObject.Properties) {
             if (-not $PSBoundParameters.ContainsKey($prop.Name)) { Set-Variable -Name $prop.Name -Value $prop.Value -Force }
         }
-    } catch {}
+    } catch { Write-Warning "Failed to load config file ${ConfigPath}: $($_.Exception.Message)" }
 }
 
 function Write-UpdateEvent {
@@ -54,16 +64,20 @@ function Stop-UpdateScript {
     param([string]$m, [int]$code)
     if ($code -ne 0) { $script:HadErrors = $true }
     Write-Warning $m
-    $type = if ($code -eq 0) { [System.Diagnostics.EventLogEntryType]::Information } elseif ($code -eq 1) { [System.Diagnostics.EventLogEntryType]::Warning } else { [System.Diagnostics.EventLogEntryType]::Error }
+    # 3010 (added by the -NoImmediateReboot path) is a success state - a
+    # reboot is needed, not an error - so it's grouped with 0 here instead of
+    # falling into the generic Error branch, which would otherwise log a
+    # routine, expected outcome as an Application-log error.
+    $type = if ($code -in 0, 3010) { [System.Diagnostics.EventLogEntryType]::Information } elseif ($code -eq 1) { [System.Diagnostics.EventLogEntryType]::Warning } else { [System.Diagnostics.EventLogEntryType]::Error }
     Write-UpdateEvent $m $type 6000
-    try { Stop-Transcript } catch {}
+    try { Stop-Transcript } catch { Write-Warning "Stop-Transcript failed: $($_.Exception.Message)" }
     # The mutex is created with initiallyOwned:$false and this thread never
     # calls WaitOne() to take ownership - it's only used as a system-wide
     # "has an instance already started" check via $lockOK (createdNew).
     # ReleaseMutex() requires the calling thread to actually own the mutex,
     # so calling it here always threw. Dispose() just closes this process's
     # handle to the named mutex and needs no ownership.
-    try { $script:Mutex.Dispose() } catch {}
+    try { $script:Mutex.Dispose() } catch { Write-Warning "Mutex dispose failed: $($_.Exception.Message)" }
     exit $code
 }
 
@@ -104,7 +118,7 @@ if ($SelfUpdateSource) {
             Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`""
             exit
         } else { Remove-Item $tmp -Force }
-    } catch {}
+    } catch { Write-Warning "Self-update check failed: $($_.Exception.Message)" }
 }
 
 $freeGB = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
@@ -145,8 +159,6 @@ New-Item $LogDir -ItemType Directory -Force | Out-Null
 Start-Transcript -Path (Join-Path $LogDir "UpdateAll-$env:COMPUTERNAME.log") -Append
 Write-UpdateEvent 'Update-All start' ([System.Diagnostics.EventLogEntryType]::Information) 6000
 
-if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
-
 $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;$env:PSModulePath"
 if (-not (Get-Module -ListAvailable PSWindowsUpdate)) {
     Install-PackageProvider NuGet -Force | Out-Null
@@ -161,7 +173,7 @@ $reg = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Con
 if (-not (Test-Path $reg)) { New-Item $reg -Force | Out-Null }
 Set-ItemProperty $reg DODownloadMode 100 -Type DWord -Force
 
-try { Install-WindowsUpdate -Category 'Servicing Stack Updates' -AcceptAll -IgnoreReboot -ErrorAction SilentlyContinue } catch {}
+try { Install-WindowsUpdate -Category 'Servicing Stack Updates' -AcceptAll -IgnoreReboot -ErrorAction SilentlyContinue } catch { Write-Warning "Servicing Stack Update install failed: $($_.Exception.Message)" }
 
 function Register-Resume {
     $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
@@ -169,6 +181,20 @@ function Register-Resume {
     Register-ScheduledTask -TaskName 'ResumeUpdateAll' -TaskPath '\Temp\' -Action $a -Trigger $t -Force | Out-Null
 }
 function Remove-Resume { Unregister-ScheduledTask -TaskName 'ResumeUpdateAll' -TaskPath '\Temp\' -Confirm:$false -ErrorAction SilentlyContinue }
+function Test-PendingReboot {
+    # Registry-only fallback for when Get-WURebootStatus (PSWindowsUpdate) throws -
+    # same checks used by Uninstall-ezPivCard.ps1 elsewhere in this repo.
+    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+        return $true
+    }
+    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+        return $true
+    }
+    $pfro = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' `
+                             -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+    if ($pfro -and $pfro.PendingFileRenameOperations) { return $true }
+    return $false
+}
 function Test-NeedReboot {
     try { $s = Get-WURebootStatus; return ($s.RebootPending -or $s.WindowsUpdatePending) } catch { try { return (Test-PendingReboot) } catch { return $false } }
 }
@@ -179,7 +205,15 @@ $resumeCount = 0
 if (Test-Path $resumeCountFile) { $resumeCount = [int](Get-Content $resumeCountFile -ErrorAction SilentlyContinue) }
 
 $loop = $true
+# Independent of $maxResumeAttempts above (which caps reboot/resume cycles):
+# this catches the case where Install-WindowsUpdate keeps throwing on the
+# same KB(s) without a reboot ever becoming pending, which would otherwise
+# spin this loop forever since $updates never empties and no reboot ever
+# breaks out via the resume-cap path.
+$consecutiveFailures = 0
+$maxConsecutiveFailures = 5
 while ($loop) {
+    $installFailedThisPass = $false
     $rawUpdates = Get-WindowsUpdate -MicrosoftUpdate -NotCategory 'Upgrades' -IgnoreReboot -AcceptAll -ErrorAction SilentlyContinue |
         Where-Object { $_.KBArticleIDs }
     $updates = $rawUpdates | Where-Object { -not ($_.KBArticleIDs | Where-Object { $_ -in $SkipKB }) }
@@ -189,12 +223,12 @@ while ($loop) {
     if ($ForceKB) {
         $missing = $ForceKB | Where-Object { $_ -notin $updates.KBArticleIDs }
         if ($missing) {
-            try { Install-WindowsUpdate -KBArticleID $missing -MicrosoftUpdate -AcceptAll -IgnoreReboot } catch { $script:HadErrors = $true }
+            try { Install-WindowsUpdate -KBArticleID $missing -MicrosoftUpdate -AcceptAll -IgnoreReboot } catch { $script:HadErrors = $true; $installFailedThisPass = $true }
         }
     }
 
     if ($updates) {
-        try { Install-WindowsUpdate -Updates $updates -MicrosoftUpdate -AcceptAll -IgnoreReboot } catch { $script:HadErrors = $true }
+        try { Install-WindowsUpdate -Updates $updates -MicrosoftUpdate -AcceptAll -IgnoreReboot } catch { $script:HadErrors = $true; $installFailedThisPass = $true }
     } else {
         $loop = $false
     }
@@ -203,17 +237,28 @@ while ($loop) {
         try {
             $payload = @{Computer = $env:COMPUTERNAME; UTC = (Get-Date).ToUniversalTime(); KBs = $updates.KBArticleIDs } | ConvertTo-Json
             Invoke-RestMethod -Method Post -Uri $LogEndpoint -Body $payload -ContentType 'application/json' -TimeoutSec 15
-        } catch {}
+        } catch { Write-Warning "LogEndpoint post failed: $($_.Exception.Message)" }
     }
 
     if (Test-NeedReboot) {
+        $consecutiveFailures = 0
         $resumeCount++
         Set-Content -Path $resumeCountFile -Value $resumeCount
         if ($resumeCount -gt $maxResumeAttempts) {
             Stop-UpdateScript "Exceeded $maxResumeAttempts reboot/resume cycles without completing updates" 2
         }
         Register-Resume
+        if ($NoImmediateReboot) {
+            Stop-UpdateScript "Reboot required; -NoImmediateReboot set, so leaving the reboot to the caller (resume task is registered)." 3010
+        }
         Restart-Computer -Force
+    } elseif ($installFailedThisPass) {
+        $consecutiveFailures++
+        if ($consecutiveFailures -ge $maxConsecutiveFailures) {
+            Stop-UpdateScript "Aborting after $maxConsecutiveFailures consecutive update-install failures with no reboot pending" 2
+        }
+    } else {
+        $consecutiveFailures = 0
     }
 }
 Remove-Item $resumeCountFile -Force -ErrorAction SilentlyContinue
@@ -227,8 +272,8 @@ if ($WingetCatchUp) {
 
 Remove-Resume
 Stop-Transcript
-try { $script:Mutex.Dispose() } catch {}
+try { $script:Mutex.Dispose() } catch { Write-Warning "Mutex dispose failed: $($_.Exception.Message)" }
 if ($script:HadErrors) { $exit = 2 } elseif ($script:Skipped) { $exit = 1 } else { $exit = 0 }
 Write-UpdateEvent 'Update-All end' ([System.Diagnostics.EventLogEntryType]::Information) 6006
-if (Get-Module -ListAvailable BurntToast) { try { Import-Module BurntToast -ErrorAction SilentlyContinue; New-BurntToastNotification -Text 'Updates applied', 'System may reboot.' -Silent } catch {} }
+if (Get-Module -ListAvailable BurntToast) { try { Import-Module BurntToast -ErrorAction SilentlyContinue; New-BurntToastNotification -Text 'Updates applied', 'System may reboot.' -Silent } catch { Write-Warning "BurntToast notification failed: $($_.Exception.Message)" } }
 exit $exit

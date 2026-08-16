@@ -54,6 +54,11 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         exit $Code
     }
 
+    # Set whenever any install/patch step below returns 3010/1641, so the
+    # final Exit-Script call can actually report reboot-required instead of
+    # always hardcoding success (0) regardless of what happened.
+    $script:RebootNeeded = $false
+
     # Resolves winget.exe in both user sessions and SYSTEM context (Intune)
     function Get-WingetExe {
         $wg = Get-Command winget -ErrorAction SilentlyContinue
@@ -184,9 +189,17 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
                       -ArgumentList (@('upgrade') + $commonArgs) `
                       -TimeoutSeconds 1800
             Write-Log "winget upgrade exit code: $wgExit"
+            # 3010/1641 weren't previously recognized as success here, so a
+            # winget upgrade that actually succeeded but needed a reboot fell
+            # through to the manual MSP-patch fallback below as if it had
+            # failed, doing a redundant reinstall attempt.
             if ($wgExit -in @(0, -1978335189)) {
                 Write-Log "winget upgrade succeeded."
                 $usedWinget = $true
+            } elseif ($wgExit -in @(3010, 1641)) {
+                Write-Log "winget upgrade succeeded (reboot required, exit $wgExit)."
+                $usedWinget = $true
+                $script:RebootNeeded = $true
             } else {
                 Write-Log "winget upgrade failed (exit $wgExit) - will fall back to manual MSP patch."
                 $needsPatch = $true
@@ -198,9 +211,10 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
                       -ArgumentList (@('install') + $commonArgs) `
                       -TimeoutSeconds 1800
             Write-Log "winget install exit code: $wgExit"
-            if ($wgExit -eq 0 -and (Test-Path $acroPath)) {
-                Write-Log "winget install succeeded."
+            if ($wgExit -in @(0, 3010, 1641) -and (Test-Path $acroPath)) {
+                Write-Log "winget install succeeded$(if ($wgExit -ne 0) { " (reboot required, exit $wgExit)" })."
                 $usedWinget = $true
+                if ($wgExit -in @(3010, 1641)) { $script:RebootNeeded = $true }
             } else {
                 Write-Log "winget install failed (exit $wgExit) - falling back to manual install."
             }
@@ -239,6 +253,8 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
             $vcExit = Invoke-Process -FilePath $vcFile -ArgumentList '/install /quiet /norestart' -TimeoutSeconds 300
             if ($vcExit -notin @(0, 3010)) {
                 Write-Log "WARNING - VC++ 2013 install returned exit code $vcExit."
+            } elseif ($vcExit -eq 3010) {
+                $script:RebootNeeded = $true
             }
         } else {
             Write-Log "VC++ 2013 x64 already present (v$($vc2013[0].DisplayVersion))."
@@ -308,6 +324,8 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
                        -TimeoutSeconds 1800
             if ($msiExit -notin @(0, 3010, 1641)) {
                 Write-Log "ERROR - Base install failed with exit code $msiExit."; Exit-Script 1
+            } elseif ($msiExit -in 3010, 1641) {
+                $script:RebootNeeded = $true
             }
             $needsPatch = $true
         }
@@ -358,8 +376,8 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
                      -TimeoutSeconds 1800
         switch ($patchExit) {
             0       { Write-Log "Patch applied successfully." }
-            3010    { Write-Log "Patch applied - reboot required (3010)." }
-            1641    { Write-Log "Patch applied - installer initiated reboot (1641)." }
+            3010    { Write-Log "Patch applied - reboot required (3010)."; $script:RebootNeeded = $true }
+            1641    { Write-Log "Patch applied - installer initiated reboot (1641)."; $script:RebootNeeded = $true }
             default { Write-Log "ERROR - Patch failed with exit code $patchExit."; Exit-Script 1 }
         }
     }
@@ -374,4 +392,4 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
     Write-Log "Version after:  $(Get-AcrobatVersion)"
     Write-Log "Cleaning up temp files..."
     Write-Log "=== Deployment finished (via $method) on $env:COMPUTERNAME ==="
-    Exit-Script 0
+    Exit-Script $(if ($script:RebootNeeded) { 3010 } else { 0 })

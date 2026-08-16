@@ -15,6 +15,12 @@
 
 Set-StrictMode -Version Latest
 
+# Enforce TLS 1.2+ here rather than trusting every caller to set it before
+# importing this module - Edge.ps1 currently does, but that made it a silent
+# footgun for any future caller (e.g. installChrome.ps1, if it's ever moved
+# onto this module) that doesn't.
+if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
+
 # Cache which event sources have already been registered this process, so
 # Write-DeployLog doesn't re-check [Diagnostics.EventLog]::SourceExists on
 # every single call.
@@ -46,7 +52,7 @@ function Close-SingleInstanceLock {
         [Parameter(Mandatory)][string]$Path
     )
     if ($LockStream) {
-        try { $LockStream.Close() } catch {}
+        try { $LockStream.Close() } catch { Write-Verbose "Failed to close lock stream: $($_.Exception.Message)" }
     }
     Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
 }
@@ -186,7 +192,7 @@ function Write-DeployLog {
             $script:RegisteredEventSources[$EventSource] = $true
         }
         Write-EventLog -LogName Application -Source $EventSource -EntryType $Level -EventId $EventId -Message $Message -ErrorAction SilentlyContinue
-    } catch {}
+    } catch { Write-Verbose "Failed to write to event log: $($_.Exception.Message)" }
 }
 
 Export-ModuleMember -Function New-SingleInstanceLock, Close-SingleInstanceLock, Get-AdaptiveBitsPriority, Invoke-VerifiedDownload, Write-DeployLog

@@ -3,5 +3,4 @@ cd /d "%~dp0"
 
 powershell.exe -ExecutionPolicy Bypass -File "%~dp0installChrome.ps1"
 set "EXITCODE=%errorlevel%"
-pause
 exit /b %EXITCODE%

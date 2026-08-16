@@ -69,7 +69,7 @@ if (-not $Proxy) {
     try {
         $proxyOut = (netsh winhttp show proxy) 2>&1
         if ($proxyOut -match 'Proxy Server\W*:\W*(\S+)') { $Proxy = $Matches[1] }
-    } catch {}
+    } catch { Write-Warning "Proxy auto-detection failed: $($_.Exception.Message)" }
 }
 
 # Concurrency lock
@@ -337,9 +337,9 @@ do {
                 -ArgumentList "/i `"$MsiPath`" /qn /norestart ALLUSERS=1" `
                 -Wait -PassThru
     switch ($proc.ExitCode) {
-        0       { $State.Result = 'Success';         $exit = 0  }
-        3010    { $State.Result = 'RebootRequired';  $exit = 10 }
-        1641    { $State.Result = 'InstallerReboot'; $exit = 10 }
+        0       { $State.Result = 'Success';         $exit = 0    }
+        3010    { $State.Result = 'RebootRequired';  $exit = 3010 }
+        1641    { $State.Result = 'InstallerReboot'; $exit = 1641 }
         default { $State.Result = "Error_$($proc.ExitCode)"; $exit = 30 }
     }
     Write-Log "Install result: $($State.Result)"

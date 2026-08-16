@@ -79,22 +79,22 @@ foreach ($computer in $computers) {
     }
 
     try {
-        New-Item -Path $uncTemp -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        if ($PSCmdlet.ShouldProcess($computer, 'Copy installer and install Chrome via msiexec')) {
+            New-Item -Path $uncTemp -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
 
-        robocopy $SourcePath $uncTemp /mir /R:2 /W:2 | Out-Null
-        if ($LASTEXITCODE -ge 8) {
-            Write-Warning "[$computer] Robocopy failed (exit $LASTEXITCODE) - skipping."
-            $failed.Add($computer)
-            continue
-        }
+            robocopy $SourcePath $uncTemp /mir /R:2 /W:2 | Out-Null
+            if ($LASTEXITCODE -ge 8) {
+                Write-Warning "[$computer] Robocopy failed (exit $LASTEXITCODE) - skipping."
+                $failed.Add($computer)
+                continue
+            }
 
-        if ($PSCmdlet.ShouldProcess($computer, 'Install Chrome via msiexec')) {
             # Merge stderr into the output instead of discarding it, so a
             # real failure still has diagnostic detail attached instead of
             # just a bare exit code.
             $psexecOutput = & $PsExecPath "\\$computer" -s -accepteula cmd /c "msiexec.exe /I `"$remoteMsi`" /qn /norestart" 2>&1
             $rc = $LASTEXITCODE
-            if ($rc -in @(0, 3010)) {
+            if ($rc -in @(0, 3010, 1641)) {
                 Write-Host "[$computer] Chrome installed successfully (exit $rc)." -ForegroundColor Green
                 $succeeded.Add($computer)
             } else {

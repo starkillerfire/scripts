@@ -13,7 +13,7 @@
       • Health status.json with exponential retry back-off
       • Switches: -AuditOnly -NoHashCheck -NoResume -Cleanup -VerboseLog
       • Automatically force-closes Edge if running
-      • Custom exit codes: 0 Success  10 Reboot  20 DownloadFail  30 OtherError
+      • Exit codes: 0 Success  3010/1641 Reboot required (standard MSI codes)  20 DownloadFail  30 OtherError
       • Event IDs: 2301 Start  2302 DownloadFail  2303 HashFail  2304 Success  2305 NoUpdate
       • Log rotation with ZIP compression; transcript compressed after run
       • JSON result includes installer SHA-256
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 
 #############################  ENUM / CONSTANTS  #############################
 
-enum DeployExit { Success = 0; Reboot = 10; DownloadFail = 20; OtherError = 30 }
+enum DeployExit { Success = 0; DownloadFail = 20; OtherError = 30 }
 
 $EventSource = 'Install-Edge-Enterprise'
 $EvtStart    = 2301
@@ -79,14 +79,14 @@ if ([Environment]::OSVersion.Version.Build -lt $MinOsBuild) {
 Import-Module (Join-Path $PSScriptRoot '..\Common\BrowserDeploy.Common.psm1') -Force
 
 $sslProto = [System.Net.SecurityProtocolType]::Tls12
-try { $sslProto = $sslProto -bor [System.Net.SecurityProtocolType]::Tls13 } catch {}
+try { $sslProto = $sslProto -bor [System.Net.SecurityProtocolType]::Tls13 } catch { Write-Warning "TLS 1.3 not available on this host: $($_.Exception.Message)" }
 [System.Net.ServicePointManager]::SecurityProtocol = $sslProto
 
 if (-not $Proxy) {
     try {
         $winhttp = (netsh winhttp show proxy) 2>&1
         if ($winhttp -match 'Proxy Server') { $Proxy = ($winhttp -split ': ')[1].Trim() }
-    } catch {}
+    } catch { Write-Warning "Proxy auto-detection failed: $($_.Exception.Message)" }
 }
 
 ######################### 3. SINGLE-INSTANCE LOCK ############################
@@ -245,10 +245,10 @@ try {
     Write-Log 'Launching Edge installer…' $EvtStart
     $p = Start-Process msiexec.exe -ArgumentList '/i', $Installer, '/qn', '/norestart' -Wait -PassThru
     switch ($p.ExitCode) {
-        0 { $Res='Success';$Exit=[DeployExit]::Success }
-        3010 { $Res='RebootRequired';$Exit=[DeployExit]::Reboot }
-        1641 { $Res='InstallerReboot';$Exit=[DeployExit]::Reboot }
-        default { $Res="Error_$($p.ExitCode)";$Exit=[DeployExit]::OtherError }
+        0 { $Res='Success';$Exit=[int][DeployExit]::Success }
+        3010 { $Res='RebootRequired';$Exit=3010 }
+        1641 { $Res='InstallerReboot';$Exit=1641 }
+        default { $Res="Error_$($p.ExitCode)";$Exit=[int][DeployExit]::OtherError }
     }
     $State.Version="$Latest";$State.Result=$Res;$State.Hash=$Sha;Save-State 'Done'
     Write-Log "Installer exited with code $($p.ExitCode) ($Res)" $EvtSuccess

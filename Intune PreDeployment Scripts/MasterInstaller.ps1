@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Enterprise-grade installer / updater for Adobe Acrobat Reader, Google Chrome, Microsoft Edge,
+    Enterprise-grade installer / updater for Adobe Acrobat Pro, Google Chrome, Microsoft Edge,
     Dell Command Update, and Windows Updates.
 
 .DESCRIPTION
@@ -39,14 +39,29 @@ Set-StrictMode -Version Latest
 # external/downloaded source, put a real pinned hash here instead of
 # leaving it blank.
 $Products = @(
-    @{ Name = 'Acrobat'; WingetId = 'Adobe.Acrobat.Reader.64-bit';
+    @{ Name = 'Acrobat'; WingetId = 'Adobe.Acrobat.Pro';
        Fallback = Join-Path $PSScriptRoot 'Acrobat/installAcrobat.ps1';
-       Sha256   = ''; DisplayNamePattern = 'Adobe Acrobat Reader*' },
+       # 'Adobe Acrobat DC*' (not a bare '*') is intentional: Acrobat/Standard
+       # DC's real uninstall-registry DisplayName is "Adobe Acrobat DC"
+       # (optionally with a trailing qualifier), while Reader DC's is
+       # "Adobe Acrobat Reader DC" - the literal "DC" immediately after
+       # "Adobe Acrobat " only appears on the non-Reader product, so this
+       # anchored pattern matches Pro/DC without also matching Reader if it
+       # were ever present. Get-InstalledVersion only does a plain -like,
+       # with no separate exclusion mechanism, so the pattern itself has to
+       # carry that distinction.
+       Sha256   = ''; DisplayNamePattern = 'Adobe Acrobat DC*' },
     @{ Name = 'Chrome' ; WingetId = 'Google.Chrome';
        Fallback = Join-Path $PSScriptRoot 'Chrome/installChrome.ps1';
        Sha256   = ''; DisplayNamePattern = 'Google Chrome' },
     @{ Name = 'Edge'   ; WingetId = 'Microsoft.Edge';
        Fallback = Join-Path $PSScriptRoot 'Edge/Edge.ps1';
+       # Deliberately an EXACT match, not a wildcard: "Microsoft Edge*" would
+       # also match "Microsoft Edge WebView2 Runtime" and "Microsoft Edge
+       # Update", both commonly present alongside real Edge, and
+       # Get-InstalledVersion's Select-Object -First 1 has no ordering
+       # guarantee against the real Edge entry - a wildcard here risks
+       # silently reading WebView2's version instead of the browser's.
        Sha256   = ''; DisplayNamePattern = 'Microsoft Edge' }
 )
 
@@ -61,7 +76,7 @@ function Initialize-Logging {
         Move-Item $LogPath $backup -Force
     }
     if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
-        try { New-EventLog -LogName Application -Source $EventSource } catch {}
+        try { New-EventLog -LogName Application -Source $EventSource } catch { Write-Log -Level 'Warning' -Message "Failed to create event log source '$EventSource': $($_.Exception.Message)" }
     }
     Start-Transcript -Path $LogPath -Append | Out-Null
 }
@@ -76,7 +91,7 @@ function Write-Log {
     if (-not $Quiet) { Write-Host "$stamp [$Level] $Message" }
     try {
         Write-EventLog -LogName Application -Source $EventSource -EventId $EventId -EntryType $Level -Message $Message
-    } catch {}
+    } catch { Write-Host "Failed to write to event log: $($_.Exception.Message)" }
 }
 
 function Assert-Admin {
@@ -88,7 +103,12 @@ function Assert-Admin {
 }
 
 function Assert-64BitHost {
-    if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+    # Only x86 is genuinely 32-bit; AMD64 and ARM64 are both legitimate
+    # 64-bit host architectures. The previous '-ne AMD64' check would also
+    # fire on native ARM64 Windows (where PROCESSOR_ARCHITECTURE is ARM64),
+    # relaunching under an "AMD64" powershell.exe path that would itself
+    # report ARM64 again - an infinite relaunch loop.
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') {
         $ps64 = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
         Write-Log -Level 'Information' -Message 'Re-launching under 64-bit PowerShell…' -EventId 1000
         & $ps64 -NoLogo -ExecutionPolicy Bypass -File $PSCommandPath @PSBoundParameters
@@ -96,7 +116,7 @@ function Assert-64BitHost {
     }
 }
 
-function Enable-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = 3072 } catch {} }
+function Enable-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = 3072 } catch { Write-Log -Level 'Warning' -Message "Failed to enable TLS 1.2: $($_.Exception.Message)" } }
 
 function Set-ProxyFromRegistry {
     $reg = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -184,39 +204,65 @@ function Get-InstalledVersion {
 }
 
 function Install-DellCommandUpdate {
+    # The DCU folder ships only the real installer script ("Dell command
+    # update install and update.ps1") - no dcu-cli.exe or *.msi lives in
+    # this folder directly, so the previous binary-lookup logic here never
+    # found anything to run. Invoke that script the same way the Windows
+    # Updates script is invoked below (execution-policy save/restore around
+    # a child powershell.exe -File call, then check $LASTEXITCODE - a
+    # nonzero external-process exit code doesn't throw a terminating error,
+    # so this can't rely on try/catch to detect failure).
+    #
+    # IMPORTANT: the DCU script's own exit code (see its final `exit
+    # ([int]$exitCode)`) is dcu-cli.exe's raw /applyUpdates exit code, Dell's
+    # own scheme - NOT an MSI/Intune code. Per Dell's dcu-cli reference, 0 =
+    # success/no reboot and 1 = success/reboot required; 3010/1641 mean
+    # nothing in this context and previously caused a real "reboot required"
+    # result (code 1) to be misread as a failure. The DCU script's own catch
+    # block separately uses exit 500 as its "internal script error, retry
+    # scheduled via RunOnce" sentinel - also not a dcu-cli code, so it's
+    # handled as its own case here rather than falling into the generic
+    # failure branch.
+    #
+    # -NoReboot is passed below so dcu-cli itself never triggers a reboot mid-
+    # run (it would otherwise kill this MasterInstaller process the same way
+    # Windows Updates.ps1's own forced reboot used to, before that was fixed
+    # with -NoImmediateReboot) - "reboot required" is instead reported purely
+    # via exit code 1 above, same as every other step in this script.
     param([Parameter(Mandatory)][string] $FolderPath)
     Write-Log -Level 'Information' -Message '=== Processing Dell Command Update ==='
-    $dcuCli = Join-Path $FolderPath 'dcu-cli.exe'
-    if (Test-Path $dcuCli) {
-        & $dcuCli /silent /applyupdates /log "${FolderPath}\dcu.log" /reboot=enable
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log -Level 'Information' -Message 'DCU CLI completed successfully.'
-            return @{ Status = 'Installed/Updated'; Version = 'via-CLI' }
-        }
-        # 3010/1641 are success-with-reboot-required, not failures - this
-        # used to fall through to "No DCU CLI or MSI found" on a run that
-        # actually succeeded.
-        if ($LASTEXITCODE -in 3010, 1641) {
-            Write-Log -Level 'Information' -Message 'DCU CLI completed successfully (reboot required).'
-            $script:AnyRebootNeeded = $true
-            return @{ Status = 'Installed/Updated'; Version = 'via-CLI' }
-        }
+    $dcuScript = Join-Path $FolderPath 'Dell command update install and update.ps1'
+    if (-not (Test-Path $dcuScript)) {
+        Write-Log -Level 'Error' -Message "DCU install script not found: $dcuScript"
+        return @{ Status = 'Missing' }
     }
-    $msi = Get-ChildItem -Path $FolderPath -Filter '*.msi' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($msi) {
-        & msiexec.exe /i "`"$($msi.FullName)`"" /quiet /norestart
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log -Level 'Information' -Message 'DCU MSI installed successfully.'
-            return @{ Status = 'Installed'; Version = 'via-MSI' }
+
+    $oldPol = Get-ExecutionPolicy -Scope Process
+    try {
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $dcuScript -NoReboot
+        switch ($LASTEXITCODE) {
+            0 {
+                Write-Log -Level 'Information' -Message 'DCU script completed successfully.'
+                return @{ Status = 'Installed/Updated'; Version = 'via-Script' }
+            }
+            1 {
+                Write-Log -Level 'Information' -Message 'DCU script completed successfully (reboot required).'
+                $script:AnyRebootNeeded = $true
+                return @{ Status = 'Installed/Updated'; Version = 'via-Script' }
+            }
+            500 {
+                Write-Log -Level 'Error' -Message 'DCU script failed internally; it has scheduled its own RunOnce retry for next boot.'
+                return @{ Status = 'Failed_WillRetryNextBoot' }
+            }
+            default {
+                Write-Log -Level 'Error' -Message "DCU script (dcu-cli) exited with code $LASTEXITCODE."
+                return @{ Status = "Failed_ExitCode_$LASTEXITCODE" }
+            }
         }
-        if ($LASTEXITCODE -in 3010, 1641) {
-            Write-Log -Level 'Information' -Message 'DCU MSI installed successfully (reboot required).'
-            $script:AnyRebootNeeded = $true
-            return @{ Status = 'Installed'; Version = 'via-MSI' }
-        }
+    } finally {
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy $oldPol -Force
     }
-    Write-Log -Level 'Error' -Message 'No DCU CLI or MSI found in DCU folder.'
-    return @{ Status = 'Missing' }
 }
 
 #===================  MAIN  ===================#
@@ -285,7 +331,7 @@ try {
         try {
             $oldPol = Get-ExecutionPolicy -Scope Process
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
-            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $wuScriptPath
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $wuScriptPath -NoImmediateReboot
             # A nonzero exit code from an external process does not throw a
             # terminating PowerShell error (even with -ErrorAction Stop), so
             # this always logged "completed successfully" regardless of
@@ -329,6 +375,13 @@ try {
     }
 
     Write-Log -Level 'Information' -Message '=== MasterInstaller completed successfully ==='
+    if ($needsReboot) {
+        # 3010 is the standard MSI/Intune "success, reboot required" signal -
+        # exiting 0 here would let Intune mark the deployment complete while
+        # masking the fact that a child installer is still waiting on a
+        # restart to finish.
+        Exit 3010
+    }
     Exit 0
 } catch {
     Write-Log -Level 'Error' -Message "Unhandled exception: $_"
