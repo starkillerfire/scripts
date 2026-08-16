@@ -45,8 +45,10 @@ function Write-Log {
 
 Add-Content -Path $LogFile -Value ("Conversion Log - {0}`n{1}" -f (Get-Date), ('-' * 40)) -Encoding UTF8
 
-$files = Get-ChildItem -Path $InputFolder -Filter '*.doc*' |
-         Where-Object { $_.Extension -match '^(?i)\.doc(m?)$' }
+# @() wrapper: under Set-StrictMode, a single match yields a bare scalar with
+# no .Count property, and the check below would throw instead of reading 1.
+$files = @(Get-ChildItem -Path $InputFolder -Filter '*.doc*' |
+         Where-Object { $_.Extension -match '^(?i)\.doc(m?)$' })
 
 if ($files.Count -eq 0) {
     Write-Log "No .doc/.docm files found in $InputFolder."

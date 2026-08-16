@@ -28,13 +28,21 @@ param (
 # only explicit throws would, letting a real failure pass through silently
 # unlogged instead of being caught and surfaced.
 $ErrorActionPreference = 'Stop'
+# Was missing here, unlike most of the repo - catches referencing an
+# undefined/misspelled variable immediately instead of silently treating it
+# as $null.
+Set-StrictMode -Version Latest
 
 # ─── Constants / pre-flight ────────────────────────────────────────────────
 try { [Net.ServicePointManager]::SecurityProtocol = 3072 -bor 12288 }
 catch { [Net.ServicePointManager]::SecurityProtocol = 3072 }
 
 $DownloadBase  = 'https://download.microsoft.com/download/4/7/5/47531001'
-$Arch          = if (${env:PROCESSOR_ARCHITECTURE} -eq 'x86') { 'x86' } else { 'x64' }
+# PROCESSOR_ARCHITECTURE reflects the PowerShell host's own bitness, not the
+# OS's - a 32-bit PowerShell host on 64-bit Windows would misreport 'x86'.
+# PROCESSOR_ARCHITEW6432 is only set when running under WOW64 (i.e. a 32-bit
+# process on a 64-bit OS), so its presence means the OS is really x64.
+$Arch          = if (${env:PROCESSOR_ARCHITECTURE} -eq 'x86' -and -not ${env:PROCESSOR_ARCHITEW6432}) { 'x86' } else { 'x64' }
 $DownloadUrl   = "$DownloadBase-$Arch-enu/infopath_4753-1001_${Arch}_en-us.exe"
 $InstallerFile = Join-Path $TempPath (Split-Path $DownloadUrl -Leaf)
 $Transcript    = Join-Path $LogRoot 'InfoPathTranscript.log'
@@ -55,7 +63,13 @@ function Write-Log {
     Write-Information $line
 
     if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
-        try { New-EventLog -LogName Application -Source $EventSource } catch {}
+        try { New-EventLog -LogName Application -Source $EventSource } catch {
+            # Not calling Write-Log here: this catch runs inside Write-Log
+            # itself, and if event-source creation keeps failing (e.g. no
+            # rights) a Write-Log call in here would recurse into Write-Log
+            # -> New-EventLog -> catch -> Write-Log forever.
+            Write-Warning "Could not create event log source '$EventSource': $($_.Exception.Message)"
+        }
     }
     $entryType = if ($Level -eq 'ERROR') { 'Error' } else { 'Information' }
     Write-EventLog -LogName Application -Source $EventSource `
@@ -77,7 +91,7 @@ function Test-InfoPathInstalled {
     )
     foreach ($key in $regKeys) {
         $found = Get-ChildItem $key -ErrorAction SilentlyContinue | ForEach-Object {
-            try { (Get-ItemProperty $_.PSPath).DisplayName } catch {}
+            try { (Get-ItemProperty $_.PSPath).DisplayName } catch { Write-Log "Could not read DisplayName from a registry uninstall key: $($_.Exception.Message)" 'DEBUG' }
         } | Where-Object { $_ -match 'Microsoft\s+InfoPath\s+2013' }
         if ($found) { return $true }
     }
@@ -145,7 +159,7 @@ function Test-Authenticode {
 function Install-Infopath {
     [CmdletBinding()] param([string]$InstallerPath)
 
-    $installerArgs = '/quiet /norestart', "/log:`"$LogRoot\InfoPath2013.log`""
+    $installerArgs = '/quiet', '/norestart', "/log:`"$LogRoot\InfoPath2013.log`""
     Write-Log "Launching installer $InstallerPath $($installerArgs -join ' ')"
 
     $proc = Start-Process -FilePath $InstallerPath -ArgumentList $installerArgs `
@@ -188,6 +202,6 @@ catch {
     throw
 }
 finally {
-    try { Stop-Transcript | Out-Null } catch {}
+    try { Stop-Transcript | Out-Null } catch { Write-Log "Stop-Transcript failed: $($_.Exception.Message)" 'DEBUG' }
     Write-Log '=== Script finished ==='
 }

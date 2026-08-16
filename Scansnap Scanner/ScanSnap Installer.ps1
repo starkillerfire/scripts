@@ -21,8 +21,13 @@ param(
     [switch]$KeepFiles
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
+
+# origin.pfultd.com is a third-party host outside Microsoft/Google's CDNs;
+# don't rely on the OS/.NET default protocol on freshly-imaged machines.
+if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
 
 # --- Paths -------------------------------------------------------------
 $exePath = Join-Path $WorkFolder 'ScanSnapOffline.exe'

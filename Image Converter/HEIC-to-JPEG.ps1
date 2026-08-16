@@ -82,7 +82,9 @@ if (-not (Get-AppxPackage -Name Microsoft.HEIFImageExtension -ErrorAction Silent
 # --- Discover files ---
 $getChildArgs = @{ Path = $SourceFolder; Filter = '*.heic' }
 if ($Recurse) { $getChildArgs['Recurse'] = $true }
-$files = Get-ChildItem @getChildArgs
+# @() wrapper: under Set-StrictMode, a single match yields a bare scalar with
+# no .Count property, and the check below would throw instead of reading 1.
+$files = @(Get-ChildItem @getChildArgs)
 
 if ($files.Count -eq 0) {
     Write-Log "No .heic files found in $SourceFolder"

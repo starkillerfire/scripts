@@ -70,10 +70,14 @@ $($bbApps | Sort-Object DisplayName | Format-Table DisplayName, DisplayVersion, 
 $capilog = "Microsoft-Windows-CAPI2/Operational"
 $capiEnabled = $false
 try {
+  # wevtutil.exe is a native command - a nonzero exit code doesn't raise a
+  # terminating PowerShell error, so try/catch alone never caught a real
+  # failure here (e.g. access denied) and it was silently reported as success.
   wevtutil sl "$capilog" /e:true | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "wevtutil exited $LASTEXITCODE" }
   $capiEnabled = $true
   Write-Ok "Enabled CAPI2 Operational logging."
-} catch { Warn "Could not enable CAPI2 logging (try running PowerShell as Administrator). Continuing." }
+} catch { Write-Warn "Could not enable CAPI2 logging (try running PowerShell as Administrator). Continuing." }
 
 try {
   Write-Host ""
@@ -93,14 +97,17 @@ try {
     $evtx = Join-Path $EvtDir "CAPI2_Recent.evtx"
     wevtutil epl "$capilog" "$evtx" /q:"$Query" | Out-Null
     Write-Ok "Exported recent CAPI2 events → $evtx"
-  } catch { Warn "CAPI2 export failed (insufficient rights or no events). You can export manually from Event Viewer." }
+  } catch { Write-Warn "CAPI2 export failed (insufficient rights or no events). You can export manually from Event Viewer." }
 } finally {
   # This is the only place CAPI2 logging gets turned back off, so it needs
   # to run even if the "reproduce the issue" prompt or the event export
   # above throws unexpectedly - otherwise a single hiccup mid-script would
   # leave verbose CAPI2 logging running indefinitely on the user's machine.
   if ($capiEnabled) {
-    try { wevtutil sl "$capilog" /e:false | Out-Null } catch {}
+    try {
+      wevtutil sl "$capilog" /e:false | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "wevtutil exited $LASTEXITCODE" }
+    } catch { Write-Warn "Could not disable CAPI2 logging: $($_.Exception.Message)" }
   }
 }
 
@@ -131,26 +138,26 @@ try {
   Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_my.txt")  "certutil.exe" "-user -store my"
   Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_ca.txt")  "certutil.exe" "-user -store ca"
   Invoke-CmdOut (Join-Path $DiagDir "cert_store_user_root.txt") "certutil.exe" "-user -store root"
-} catch { Warn "Could not read current-user certificate stores: $($_.Exception.Message)" }
+} catch { Write-Warn "Could not read current-user certificate stores: $($_.Exception.Message)" }
 
 # b) LocalMachine stores (if admin)
 try {
   Invoke-CmdOut (Join-Path $DiagDir "cert_store_lm_my.txt")   "certutil.exe" "-store my"
   Invoke-CmdOut (Join-Path $DiagDir "cert_store_lm_ca.txt")   "certutil.exe" "-store ca"
   Invoke-CmdOut (Join-Path $DiagDir "cert_store_lm_root.txt") "certutil.exe" "-store root"
-} catch { Warn "Could not read LocalMachine stores (need elevation). Skipping." }
+} catch { Write-Warn "Could not read LocalMachine stores (need elevation). Skipping." }
 
 # c) Chain engine config & URL cache
 try {
   Invoke-CmdOut (Join-Path $DiagDir "cert_chain_config.txt") "certutil.exe" "-getreg chain"
   Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_list.txt") "certutil.exe" "-URLcache *"
-} catch { Warn "Could not read chain config / URL cache: $($_.Exception.Message)" }
+} catch { Write-Warn "Could not read chain config / URL cache: $($_.Exception.Message)" }
 
 # (Optional) clear user CRL/URL cache AFTER we recorded it - opt-in via -ClearUrlCache
 if ($ClearUrlCache) {
   try {
     Invoke-CmdOut (Join-Path $DiagDir "cert_urlcache_clear.txt") "certutil.exe" "-URLcache * delete"
-  } catch { Warn "Could not clear URL cache (non-fatal)." }
+  } catch { Write-Warn "Could not clear URL cache (non-fatal)." }
 } else {
   Write-Info "Skipping URL cache clear (pass -ClearUrlCache to force fresh revocation checks)."
 }
@@ -160,7 +167,7 @@ try {
   $rsop = Join-Path $DiagDir "gpresult.html"
   gpresult /h "$rsop" | Out-Null
   Write-Ok "Captured RSOP → $rsop"
-} catch { Warn "gpresult failed (non-fatal)." }
+} catch { Write-Warn "gpresult failed (non-fatal)." }
 
 # 6) Zip it all up
 $ZipPath = Join-Path $env:USERPROFILE ("Desktop\\Bluebeam_SupportBundle_$Stamp.zip")

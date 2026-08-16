@@ -11,11 +11,16 @@
 .PARAMETER LogPath
     Path to a plaintext log of what this script did. Defaults to
     C:\ProgramData\Logs\Meriden-RegFix.log.
+
+.PARAMETER BackupDir
+    Directory .reg exports of each key are written to before modification, for
+    rollback via `reg import`. Defaults to C:\ProgramData\Logs\Meriden-RegFix-Backups.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [int]    $RebootDelaySecs = 300,
-    [string] $LogPath         = 'C:\ProgramData\Logs\Meriden-RegFix.log'
+    [string] $LogPath         = 'C:\ProgramData\Logs\Meriden-RegFix.log',
+    [string] $BackupDir       = 'C:\ProgramData\Logs\Meriden-RegFix-Backups'
 )
 
 Set-StrictMode -Version Latest
@@ -47,7 +52,22 @@ try {
             continue
         }
 
-        if (-not (Test-Path $path)) {
+        # Export the key as-is before changing it, so there's an actual
+        # rollback artifact (`reg import <file>`) beyond just the before-value
+        # logged below - only possible when the key already exists, since
+        # reg.exe can't export a key that isn't there yet.
+        if (Test-Path $path) {
+            if (-not (Test-Path $BackupDir)) { New-Item -Path $BackupDir -ItemType Directory -Force | Out-Null }
+            $regPathForExport = $path -replace '^HKLM:\\', 'HKLM\'
+            $safeName = ($path -replace '[:\\]', '_')
+            $backupFile = Join-Path $BackupDir "$safeName-$(Get-Date -Format 'yyyyMMddHHmmss').reg"
+            $exportResult = & reg.exe export $regPathForExport $backupFile /y 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "Backed up $path to $backupFile before modifying (restore with: reg import `"$backupFile`")"
+            } else {
+                Write-Log "Could not back up ${path}: $exportResult" 'WARN'
+            }
+        } else {
             New-Item -Path $path -Force | Out-Null
         }
         Set-ItemProperty -Path $path -Name WorkspaceDB -Value 8 -Type DWord -Force

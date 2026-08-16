@@ -71,6 +71,15 @@ if ($Env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
 }
 
 Set-StrictMode -Version Latest
+# Rest of the repo relies on explicit throws being caught rather than on
+# non-terminating cmdlet errors being caught, so without this, a real
+# cmdlet failure here (e.g. a bad New-PSDrive/Start-Process call) would
+# print a non-terminating error and fall through instead of being caught
+# by the try/catch in the main execution block below. The one place that
+# genuinely depends on continuing past a failure - the Write-Log helper's
+# Add-Content call - gets its own explicit -ErrorAction so a transient
+# log-write failure can't abort an otherwise-successful deployment.
+$ErrorActionPreference = 'Stop'
 
 ########################################################################
 # -----------------------  Helper functions ---------------------------#
@@ -101,7 +110,7 @@ function Copy-BrPayload {
         [switch]$Incremental,[int]$MinFreeGB = 5,
         [System.Management.Automation.PSCredential]$Credential,
         [switch]$Silent,[string]$LogRoot,
-        [scriptblock]$ProgressAction,[scriptblock]$LogAction
+        [scriptblock]$ProgressCallback,[scriptblock]$LogAction
     )
     & $LogAction 'Copy-Start'
 
@@ -124,7 +133,7 @@ function Copy-BrPayload {
 
         # Integrity check
         if ($VerifyHash) {
-            & $ProgressAction 'Validating files' 10
+            & $ProgressCallback 'Validating files' 10
             $cat  = Join-Path $share 'BR2023.cat'
             $hash = Join-Path $share 'hashes.json'
             if (Test-Path $cat) {
@@ -142,7 +151,7 @@ function Copy-BrPayload {
             }
         }
 
-        & $ProgressAction 'Copying payload' 30
+        & $ProgressCallback 'Copying payload' 30
         New-Item $LocalDst -ItemType Directory -Force | Out-Null
 
         if (-not $UseBits) {
@@ -159,7 +168,7 @@ function Copy-BrPayload {
             $terminalStates = 'Transferred','Error','TransientError','Fatal'
             while ($bits.JobState -notin $terminalStates) {
                 $pct = if ($bits.BytesTotal -gt 0) { [math]::Round(($bits.BytesTransferred/$bits.BytesTotal)*100) } else { 0 }
-                & $ProgressAction "BITS $pct%" 40
+                & $ProgressCallback "BITS $pct%" 40
                 Start-Sleep 15
             }
             if ($bits.JobState -ne 'Transferred') {
@@ -168,7 +177,7 @@ function Copy-BrPayload {
             Complete-BitsTransfer -BitsJob $bits -ErrorAction Stop
         }
 
-        & $ProgressAction 'Copy complete' 50
+        & $ProgressCallback 'Copy complete' 50
         & $LogAction 'Copy-End'
     } finally {
         if ($drv) { Remove-PSDrive $drv -Force -ErrorAction SilentlyContinue }
@@ -179,11 +188,11 @@ function Invoke-BrConfig {
     [CmdletBinding()]
     param(
         [string]$LocalDst,[string]$Language='en-US',
-        [scriptblock]$ProgressAction,[scriptblock]$LogAction,
+        [scriptblock]$ProgressCallback,[scriptblock]$LogAction,
         [int]$TimeoutSeconds = 600
     )
     & $LogAction 'Config-Start'
-    & $ProgressAction 'Configuring Civil 3D' 60
+    & $ProgressCallback 'Configuring Civil 3D' 60
 
     Get-Process explorer,OneDrive -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
@@ -223,7 +232,7 @@ function Invoke-BrConfig {
                   "$Env:ONEDRIVECOMMERCIAL\Desktop" -Force -ea 0
     }
 
-    & $ProgressAction 'Config complete' 90
+    & $ProgressCallback 'Config complete' 90
     & $LogAction 'Config-End'
 }
 
@@ -274,7 +283,7 @@ $copyArgs = @{
     LocalDst       = $cfg.LocalDst
     MinFreeGB      = $cfg.MinFreeGB
     LogRoot        = $logRoot
-    ProgressAction = ${function:Show-Progress}
+    ProgressCallback = ${function:Show-Progress}
     LogAction      = ${function:Write-Log}
 }
 if ($cfg.VerifyHash)  { $copyArgs['VerifyHash']  = $true }
@@ -295,20 +304,33 @@ try {
         }
         'ConfigOnly' {
             Invoke-BrConfig -LocalDst $cfg.LocalDst -Language $cfg.Language `
-                            -ProgressAction ${function:Show-Progress} `
+                            -ProgressCallback ${function:Show-Progress} `
                             -LogAction      ${function:Write-Log}
             Write-Log 'Config only done'
         }
         'Full' {
             Copy-BrPayload @copyArgs -ErrorAction Stop
             Invoke-BrConfig -LocalDst $cfg.LocalDst -Language $cfg.Language `
-                            -ProgressAction ${function:Show-Progress} `
+                            -ProgressCallback ${function:Show-Progress} `
                             -LogAction      ${function:Write-Log} -ErrorAction Stop
             Write-Log 'Full deploy done'
         }
     }
 
-    if ($InstallCleanupTask) { Install-BrCleanupTask -ScriptPath $PSCommandPath }
+    if ($InstallCleanupTask) {
+        # $PSCommandPath here can be a per-invocation temp file: when this
+        # script runs through the remote wrapper above, it's the copy under
+        # $env:TEMP on the target machine, which the wrapper's own 'finally'
+        # deletes right after this script exits. A scheduled task registered
+        # against that path would point at a file that's already gone by the
+        # time it fires (default 30 days later). Persist a copy under
+        # ProgramData first and point the cleanup task at that instead.
+        $persistentScriptDir = "$Env:ProgramData\BR2023-Persistent"
+        New-Item $persistentScriptDir -ItemType Directory -Force -ea 0 | Out-Null
+        $persistentScriptPath = Join-Path $persistentScriptDir 'BR2023-RunOnce.ps1'
+        Copy-Item -LiteralPath $PSCommandPath -Destination $persistentScriptPath -Force
+        Install-BrCleanupTask -ScriptPath $persistentScriptPath
+    }
     Show-Progress 'Done' 100
     exit 0
 }

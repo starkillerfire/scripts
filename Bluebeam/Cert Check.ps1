@@ -139,7 +139,11 @@ Write-Ok "TSA verification outputs saved under: $tsaDir"
 # --- 2) CAPI2 enable → (optional pause) → export recent Event 11 ------------
 $capiChannel = "Microsoft-Windows-CAPI2/Operational"
 try {
+  # wevtutil.exe is a native command - a nonzero exit code doesn't raise a
+  # terminating PowerShell error, so try/catch alone never caught a real
+  # failure here (e.g. access denied) and it was silently reported as success.
   wevtutil sl "$capiChannel" /e:true | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "wevtutil exited $LASTEXITCODE" }
   Write-Ok "CAPI2 Operational logging is ENABLED and will remain on after this script finishes."
 } catch {
   Write-Err "Could not enable CAPI2 logging: $($_.Exception.Message)"
@@ -209,6 +213,7 @@ try {
 if ($DisableLoggingOnExit) {
   try {
     wevtutil sl "$capiChannel" /e:false | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "wevtutil exited $LASTEXITCODE" }
     Write-Ok "CAPI2 Operational logging has been DISABLED (per -DisableLoggingOnExit)."
   } catch {
     Write-Err "Failed to disable CAPI2 logging: $($_.Exception.Message)"

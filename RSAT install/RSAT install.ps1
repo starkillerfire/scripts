@@ -29,12 +29,16 @@ try {
     exit 1
 }
 
-$missing = $capabilities |
+# @() wrapper: under Set-StrictMode, Where-Object returning exactly one match
+# yields a bare scalar with no .Count property, and accessing .Count below
+# would throw instead of just reading 1 - forcing this to always be an array
+# regardless of match count avoids that.
+$missing = @($capabilities |
     Where-Object {
         $_.Name -like 'Rsat.*' -and
         $_.State -notin @('Installed', 'InstallPending') -and
         ($Feature -eq '' -or $_.Name -like "*$Feature*")
-    }
+    })
 
 if ($missing.Count -eq 0) {
     Write-Host "All matching RSAT features are already installed." -ForegroundColor Green

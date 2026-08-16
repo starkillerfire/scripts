@@ -34,6 +34,17 @@
 param()
 
 BEGIN {
+    # Was missing here, unlike almost every other script in this repo -
+    # catches referencing an undefined/misspelled variable immediately
+    # instead of silently treating it as $null (the exact bug class that
+    # caused the Bluebeam "Warn" vs "Write-Warn" incident elsewhere in the
+    # library). Deliberately NOT also setting $ErrorActionPreference='Stop'
+    # here: this script's existing error handling relies in several places
+    # (e.g. the hardware-hash CSV generation below) on a cmdlet call failing
+    # softly and being detected afterward via Test-Path rather than a
+    # terminating exception, and flipping the global default would change
+    # that behavior at call sites not audited for it.
+    Set-StrictMode -Version Latest
     $script:shouldContinue = $true
 
     if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -96,12 +107,15 @@ BEGIN {
         }
 
         # Record the pre-existing DNS config (almost always DHCP-assigned at
-        # OOBE) before overriding it with public resolvers. This change has
-        # no automatic restore step - it's needed through the Windows Update
-        # phase that runs later in this same flow - so the backup file is
-        # here purely so a technician can put the original servers back by
-        # hand if this device ends up on a network where they actually
-        # mattered (e.g. an internal-only resolver).
+        # OOBE) before overriding it with public resolvers, purely so a
+        # technician can inspect what was there if this device ends up on a
+        # network where the original servers actually mattered (e.g. an
+        # internal-only resolver). The dump below is a human-readable
+        # Format-Table, not structured data, so it isn't used for the
+        # automatic restore in the generated update script (see
+        # #region WindowsUpdate below) - that restore just resets each
+        # affected interface back to DHCP-assigned DNS, which matches what's
+        # here in the overwhelming majority of OOBE cases anyway.
         $dnsBackupPath = "C:\Temp\Autopilot-DNS-Backup-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
         $dnsBackup = foreach ($ifIndex in $targetInterfaceIndexes) {
             Get-DnsClientServerAddress -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue
@@ -171,6 +185,8 @@ BEGIN {
             # download. Whatever's causing the failure needs to be fixed on
             # the machine/network, not routed around.
             Write-Host "Failed to install dependencies: $($_.Exception.Message)" -ForegroundColor Red
+            $script:shouldContinue = $false
+            return
         }
     }
     else {
@@ -221,6 +237,8 @@ BEGIN {
             }
             catch {
                 Write-Host "Failed to install dependencies: $($_.Exception.Message)" -ForegroundColor Red
+                $script:shouldContinue = $false
+                return
             }
         }
         else {
@@ -280,6 +298,17 @@ Write-Host "Windows Update process completed."
 Write-Host "NOTE: If some updates failed during installation," -ForegroundColor Yellow
 Write-Host "reboot and rerun the .bat file from C:\Temp\RunWindowsUpdate.bat" -ForegroundColor Yellow
 Write-Host "==============================================="
+
+Write-Host "Restoring DHCP-assigned DNS configuration..." -ForegroundColor Yellow
+foreach (`$ifIndex in @($($targetInterfaceIndexes -join ','))) {
+    try {
+        Set-DnsClientServerAddress -InterfaceIndex `$ifIndex -ResetServerAddresses -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Could not restore DNS on interface `$ifIndex : `$(`$_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 Start-Sleep -Seconds 30
 Restart-Computer -Force
 
@@ -442,6 +471,20 @@ END {
                 elseif ($errorMessage.error -eq "slow_down") {
                     $pollInterval += 5
                 }
+                elseif ($null -eq $errorMessage) {
+                    # No parseable JSON error body means this wasn't an OAuth
+                    # error response at all - e.g. a transient network
+                    # blip/timeout on the request itself. Previously this fell
+                    # into the same branch as a real fatal OAuth error
+                    # (invalid_grant, expired_token, etc.) and aborted the
+                    # whole run; now it's treated as transient and the loop
+                    # keeps polling until $maxWait, same as authorization_pending.
+                    if (($elapsed - $lastStatusPrint) -ge 60) {
+                        $lastStatusPrint = $elapsed
+                        $remaining = $maxWait - $elapsed
+                        Write-Host "Transient error polling for token, retrying... ($remaining`s remaining): $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
                 else {
                     Write-Host "Authentication error: $($errorMessage.error_description)" -ForegroundColor Red
                     return
@@ -526,7 +569,7 @@ END {
                             # risking a duplicate-serial conflict on upload.
                             $statusCode = $null
                             if ($_.Exception.Response) {
-                                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+                                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { Write-Verbose "Could not extract HTTP status code: $($_.Exception.Message)" }
                             }
                             if ($statusCode -eq 404) {
                                 $deleteConfirmed = $true
@@ -673,6 +716,7 @@ END {
                 }
             }
             catch {
+                Write-Verbose "Autopilot device lookup failed (will retry): $($_.Exception.Message)"
             }
         }
 

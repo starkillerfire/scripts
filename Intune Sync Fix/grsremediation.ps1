@@ -1,4 +1,12 @@
-﻿#### BEGIN FUNCTIONS ####
+﻿# Was missing, unlike most sibling scripts in this repo - strict mode
+# catches undefined-variable/typo bugs immediately instead of silently
+# treating them as $null, and Stop makes non-terminating cmdlet errors
+# outside the existing try/catch blocks actually surface instead of being
+# printed and ignored.
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+#### BEGIN FUNCTIONS ####
 
 <#
     .SYNOPSIS
@@ -238,18 +246,25 @@ try {
     foreach ($state in $failedStates) {
         try {
             # Parse the subkey path to extract User and App ID
-            # Expected structure: SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\<userObjId>\<appId>\...
-            $subKeyPath = $state.SubKeyPath -replace 'HKLM:\\', ''
-            $splitPath  = $subKeyPath -split '\\'
+            # Expected structure: ...\Win32Apps\<userObjId>\<appId>\... -
+            # locate the Win32Apps segment and take the two after it, rather
+            # than a hardcoded index. $state.SubKeyPath is $subKey.PSPath from
+            # Get-FailedWin32AppStates, a provider-qualified path (e.g.
+            # "Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\...") -
+            # a previous `-replace 'HKLM:\\', ''` here never actually matched
+            # that format and was a silent no-op; the fixed-index [6]/[7]
+            # lookup below only happened to land correctly by coincidence of
+            # the untouched prefix's segment count.
+            $splitPath = $state.SubKeyPath -split '\\'
+            $win32AppsIdx = [array]::IndexOf($splitPath, 'Win32Apps')
 
-            # Index 6 = userObjectId, index 7 = appId (validate before accessing)
-            if ($splitPath.Count -lt 8) {
-                Write-Warning "Unexpected registry path structure (expected >=8 segments, got $($splitPath.Count)): $subKeyPath"
+            if ($win32AppsIdx -lt 0 -or $splitPath.Count -lt ($win32AppsIdx + 3)) {
+                Write-Warning "Unexpected registry path structure (Win32Apps segment not found or not followed by userObjectId/appId): $($state.SubKeyPath)"
                 continue
             }
 
-            $userObjectId = $splitPath[6]
-            $appId        = $splitPath[7]
+            $userObjectId = $splitPath[$win32AppsIdx + 1]
+            $appId        = $splitPath[$win32AppsIdx + 2]
 
             if ([string]::IsNullOrWhiteSpace($userObjectId) -or [string]::IsNullOrWhiteSpace($appId)) {
                 Write-Warning "Could not extract userObjectId or appId from path: $subKeyPath"
@@ -284,8 +299,10 @@ try {
     } else {
         Write-Host "No failures detected."
     }
+    exit 0
 } catch {
     Write-Error "Unhandled error in remediation script: $($_.Exception.Message)"
+    exit 1
 } finally {
     Stop-Transcript
 }
