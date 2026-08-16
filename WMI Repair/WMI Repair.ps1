@@ -48,7 +48,11 @@ $logDir = Split-Path $LogFile
 if ($logDir -and -not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
 Remove-Item $LogFile -ErrorAction SilentlyContinue
 $transcriptPath = Join-Path (Split-Path $LogFile) 'WMI_Repair_Transcript.txt'
-Start-Transcript -Path $transcriptPath -Append
+# Was -Append with nothing ever clearing it, so it grew unbounded across
+# repeated runs on the same machine - $LogFile just above is already started
+# fresh each run (Remove-Item before Add-Content), so match that here too.
+Remove-Item $transcriptPath -ErrorAction SilentlyContinue
+Start-Transcript -Path $transcriptPath
 
 # Exit on domain controllers
 try {
@@ -118,6 +122,12 @@ if (-not (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue)) 
     Stop-Service winmgmt -Force -ErrorAction SilentlyContinue
     cmd /c "winmgmt /resetrepository" | Out-Null
     Write-Log "WMI hard reset completed (exit $LASTEXITCODE)."
+    # Must restart winmgmt here, before DLL registration/MOF recompilation below -
+    # mofcomp needs a running WMI service to connect to, and previously this
+    # didn't restart until after that step, so recompilation silently failed
+    # in exactly this hard-reset scenario.
+    Start-Service winmgmt -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 5
 } else {
     Write-Log "WMI responsive after salvage - skipping hard reset."
 }

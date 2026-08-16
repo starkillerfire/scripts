@@ -122,6 +122,7 @@ function Get-SecureBootSnapshot {
         }
     }
     catch {
+        Write-Log ("Could not read Secure Boot UEFI db variable: {0}" -f $_.Exception.Message) 'WARN'
     }
 
     [pscustomobject]@{
@@ -233,11 +234,11 @@ function Test-DellAdminPasswordSet {
 
 function Get-CctkPath {
     $candidates = @(
-        "$env:ProgramFiles(x86)\Dell\Command Configure\X86_64\cctk.exe",
+        "${env:ProgramFiles(x86)}\Dell\Command Configure\X86_64\cctk.exe",
         "$env:ProgramFiles\Dell\Command Configure\X86_64\cctk.exe",
-        "$env:ProgramFiles(x86)\Dell\Command Configure\cctk.exe",
+        "${env:ProgramFiles(x86)}\Dell\Command Configure\cctk.exe",
         "$env:ProgramFiles\Dell\Command Configure\cctk.exe",
-        "$env:ProgramFiles(x86)\Dell\Command Configure\X86\cctk.exe",
+        "${env:ProgramFiles(x86)}\Dell\Command Configure\X86\cctk.exe",
         "$env:ProgramFiles\Dell\Command Configure\X86\cctk.exe"
     )
 

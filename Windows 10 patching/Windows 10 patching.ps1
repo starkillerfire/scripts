@@ -25,6 +25,12 @@ param(
     [int]         $ThrottleLimit,
     [int]         $MaxRetry            = 3,
 
+    # Safety valve for FIX 1: resolving an -OU/-CSV that unexpectedly
+    # expands to a huge machine list must not silently patch-and-reboot
+    # every match. Above this count, an explicit typed confirmation is
+    # required before the fleet loop starts.
+    [int]         $MaxTargets          = 50,
+
     # ---------- logging ----------
     # Placeholder path - update for this site, or pass -CentralLogShare.
     # An unreachable share already fails loudly below (Test-Path check),
@@ -91,6 +97,26 @@ function Get-Targets {
 $Targets = Get-Targets -Inline $ComputerName -CsvPath $ComputerListCsv -OUPath $OU -SkipOffline:$SkipOffline
 if (-not $Targets) { Write-Host "Nothing to do."; return }
 
+# ----- FIX 1: sanity check + explicit confirmation for large blast radius ----
+# An -OU/-CSV that resolves to far more machines than intended must not
+# silently patch-and-reboot the whole list. Above -MaxTargets, require a
+# typed confirmation before the fleet loop below starts. $PSCmdlet.ShouldContinue()
+# was considered, but it throws outright (rather than degrading safely) when the
+# host can't prompt (e.g. unattended/SYSTEM context) - a plain Read-Host with an
+# explicit non-interactive check fails closed instead, which is the safer
+# default for a run that patches and reboots real machines.
+if ($Targets.Count -gt $MaxTargets) {
+    Write-Warning "Resolved target list contains $($Targets.Count) computer(s), which exceeds the safety threshold of $MaxTargets (see -MaxTargets to raise it). This run will patch AND REBOOT every matched machine."
+    if (-not [Environment]::UserInteractive) {
+        throw "Aborting: $($Targets.Count) resolved target(s) exceeds -MaxTargets ($MaxTargets) and this session is non-interactive, so explicit confirmation cannot be collected. Re-run interactively to confirm, or pass a higher -MaxTargets if this scale is intentional."
+    }
+    $confirmation = Read-Host "Type YES to confirm patching and rebooting $($Targets.Count) machine(s)"
+    if ($confirmation -ne 'YES') {
+        Write-Warning "Aborted: confirmation not received for a $($Targets.Count)-machine run."
+        return
+    }
+}
+
 # ----- ring rollout (chunk by parent OU) --------------------------------------
 # A bare computer name is not a valid ADSI path - "LDAP://PC123" isn't
 # resolvable and throws, so this has to go through Get-ADComputer first to
@@ -108,7 +134,11 @@ function Get-PatchTargetOuParent {
     }
 }
 if (Get-Command Get-ADComputer -ErrorAction SilentlyContinue) {
-    $SortedTargets = $Targets | Sort-Object { Get-PatchTargetOuParent -ComputerName $_ }, $_
+    # The second sort key was a bare `$_` outside any per-item scriptblock, so
+    # it wasn't bound to the pipeline item at sort time and the intended
+    # tie-break by computer name was silently a no-op. Wrapping it in its own
+    # scriptblock makes Sort-Object evaluate it per-item like the first key.
+    $SortedTargets = $Targets | Sort-Object { Get-PatchTargetOuParent -ComputerName $_ }, { $_ }
 } else {
     Write-Warning 'ActiveDirectory module not available - skipping OU-based ring ordering.'
     $SortedTargets = $Targets
@@ -136,7 +166,6 @@ Get-ChildItem $CentralLogShare -Filter '*.log' |
 # =====  Remote payload ========================================================
 $RemotePayload = {
 param(
-    [string] $CentralShare,
     [string] $PSWUVersion,
     [switch] $ExcludeDrivers,
     [switch] $ExcludeFeatureUpgrades,
@@ -215,7 +244,10 @@ if ((Get-WURebootStatus).RebootNeeded) {
     if ($SuppressReboot) {
         Write-Log "Reboot suppressed by -NoAutoReboot - node stays pending until the offline catch-up task or a manual restart."
     } else {
-        shutdown /r /t 30 /c "PatchSweep updates"
+        # FIX 2: 30 seconds gave logged-in users essentially no real notice
+        # before the machine restarted. Lengthened to 5 minutes; /c already
+        # surfaces a message via the built-in shutdown warning dialog.
+        shutdown /r /t 300 /c "PatchSweep: this computer will restart in 5 minutes to finish installing updates. Save your work now."
     }
 }
 
@@ -270,11 +302,15 @@ $taskXml | Out-File -Encoding unicode $taskPath
 schtasks /Create /TN "PatchSweepCatchup" /XML $taskPath /RU SYSTEM /F | Out-Null
 Remove-Item $taskPath -Force
 
-# ---- copy transcript & log ----
-if (Test-Path $CentralShare) {
-    Copy-Item $trans     -Destination (Join-Path $CentralShare "$env:COMPUTERNAME.transcript.log") -Force
-    Copy-Item $localLog  -Destination (Join-Path $CentralShare "$env:COMPUTERNAME.summary.log")    -Force
-}
+# ---- stop transcript ----
+# FIX 3: the central log share copy used to happen right here, inside the
+# remote session - but that's a third hop (controller -> this machine -> file
+# server) that WinRM can't authenticate without CredSSP/delegation, which
+# isn't configured. So this payload no longer touches $CentralShare at all;
+# it just leaves the transcript/log on this machine and hands their paths
+# back to the caller. The controller (which already holds normal credentials
+# for the file share) does the actual copy to $CentralShare after this
+# Invoke-Command call returns - see the main loop below.
 Stop-Transcript | Out-Null
 
 # Explicit success marker. Invoke-Command is called synchronously (no
@@ -283,8 +319,15 @@ Stop-Transcript | Out-Null
 # Returning this object is what lets the caller in the main loop tell
 # completed nodes apart from ones that errored or never returned, by
 # matching on the PSComputerName property PowerShell attaches automatically
-# to remote output.
-[pscustomobject]@{ ComputerName = $env:COMPUTERNAME; Status = 'Completed' }
+# to remote output. TranscriptPath/LocalLogPath let the controller pull the
+# files back over the existing PSSession (Copy-Item -FromSession) and then
+# copy them on to $CentralShare itself.
+[pscustomobject]@{
+    ComputerName   = $env:COMPUTERNAME
+    Status         = 'Completed'
+    TranscriptPath = $trans
+    LocalLogPath   = $localLog
+}
 } # --- end payload
 
 # ========= MAIN loop through rings/chunks ====================================
@@ -298,15 +341,15 @@ foreach ($ring in $TargetChunks) {
         # remoting) - this used to throw a parameter-binding error on every
         # single attempt, so the remote patch step never actually ran on
         # any node. Real PSSessions are what Invoke-Command needs here.
-        $session = New-PSSession -ComputerName $remaining -Credential $AdminCred -ErrorAction SilentlyContinue
+        $session = New-PSSession -ComputerName $remaining -Credential $AdminCred -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue
         $sessionFailed = $remaining | Where-Object { $_ -notin ($session | Select-Object -ExpandProperty ComputerName) }
         foreach ($c in $sessionFailed) {
             Write-Warning "Ring attempt $try : could not establish a PS session to $c"
         }
 
         $job = Invoke-Command -Session $session -ScriptBlock $RemotePayload -ArgumentList `
-               $CentralLogShare,$PSWUVersion,$NoDrivers,$NoFeatureUpgrades,$NoAutoReboot,`
-               $OffLineCatchupHours,$OffLineCatchupSpan -ErrorAction SilentlyContinue
+               $PSWUVersion,$NoDrivers,$NoFeatureUpgrades,$NoAutoReboot,`
+               $OffLineCatchupHours,$OffLineCatchupSpan -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue
 
         # $job holds the [pscustomobject] each node returns at the end of
         # $RemotePayload. Nodes that errored partway through, or never made
@@ -316,6 +359,32 @@ foreach ($ring in $TargetChunks) {
 
         foreach ($s in $session) {
             $state = if ($s.ComputerName -in $completedComputers) { 'Completed' } else { 'Failed' }
+
+            # FIX 3 (continued): pull the transcript/log back from the remote
+            # machine over the already-authenticated PSSession, then copy
+            # them on to $CentralShare using the controller's own
+            # credentials - avoiding the double-hop that failed when this
+            # copy ran inside the remote session.
+            if ($state -eq 'Completed') {
+                $result = $job | Where-Object { $_.PSComputerName -eq $s.ComputerName } | Select-Object -First 1
+                if ($result -and $result.TranscriptPath -and $result.LocalLogPath) {
+                    try {
+                        $localTemp = Join-Path $env:TEMP "PatchSweep_$($s.ComputerName)"
+                        New-Item -ItemType Directory -Path $localTemp -Force | Out-Null
+
+                        Copy-Item -FromSession $s -Path $result.TranscriptPath -Destination $localTemp -Force -ErrorAction Stop
+                        Copy-Item -FromSession $s -Path $result.LocalLogPath   -Destination $localTemp -Force -ErrorAction Stop
+
+                        $localTrans = Join-Path $localTemp (Split-Path $result.TranscriptPath -Leaf)
+                        $localSumm  = Join-Path $localTemp (Split-Path $result.LocalLogPath   -Leaf)
+
+                        Copy-Item -Path $localTrans -Destination (Join-Path $CentralLogShare "$($s.ComputerName).transcript.log") -Force -ErrorAction Stop
+                        Copy-Item -Path $localSumm  -Destination (Join-Path $CentralLogShare "$($s.ComputerName).summary.log")    -Force -ErrorAction Stop
+                    } catch {
+                        Write-Warning "Could not copy logs for $($s.ComputerName) to central share ${CentralLogShare}: $($_.Exception.Message)"
+                    }
+                }
+            }
 
             $JobsSummary.Add([pscustomobject]@{
                 ComputerName = $s.ComputerName

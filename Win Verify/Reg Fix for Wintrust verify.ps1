@@ -24,7 +24,11 @@
 .EXAMPLE
     .\Reg Fix for Wintrust verify.ps1 -CsvPath .\systems.csv -OutputCsv .\results.csv
 #>
-[CmdletBinding()]
+# SupportsShouldProcess added so -WhatIf/-Confirm work here like they do
+# elsewhere in the repo, given this writes a registry value fleet-wide.
+# ConfirmImpact 'Medium' (below the default $ConfirmPreference of 'High') so
+# it doesn't auto-prompt-and-hang under a non-interactive/bulk CSV run.
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
     [string] $ComputerName,
     [string] $CsvPath,
@@ -44,7 +48,10 @@ $subKeyPaths = @(
 )
 
 function Set-WinVerifyTrustLocal {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     foreach ($subKey in $subKeyPaths) {
+        if (-not $PSCmdlet.ShouldProcess("HKLM:\$subKey", "Set $keyName = $keyValue")) { continue }
         $psPath = "HKLM:\$subKey"
         if (-not (Test-Path $psPath)) { New-Item -Path $psPath -Force | Out-Null }
         Set-ItemProperty -Path $psPath -Name $keyName -Value $keyValue -Type DWord -Force
@@ -52,11 +59,13 @@ function Set-WinVerifyTrustLocal {
 }
 
 function Set-WinVerifyTrustRemote {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([string]$Target)
     $remoteReg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey(
         [Microsoft.Win32.RegistryHive]::LocalMachine, $Target)
     try {
         foreach ($subKey in $subKeyPaths) {
+            if (-not $PSCmdlet.ShouldProcess("$Target\HKLM:\$subKey", "Set $keyName = $keyValue")) { continue }
             $key = $remoteReg.OpenSubKey($subKey, $true)
             if (-not $key) { $key = $remoteReg.CreateSubKey($subKey) }
             $key.SetValue($keyName, $keyValue, [Microsoft.Win32.RegistryValueKind]::DWord)

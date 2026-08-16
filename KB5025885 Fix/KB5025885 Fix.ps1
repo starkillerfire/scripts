@@ -22,7 +22,18 @@
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────
-trap { try { Stop-Transcript } catch { }; exit 1 }
+trap {
+    # Without this, any unhandled error anywhere in the script exits silently
+    # via the bare "exit 1" below - the transcript captures nothing about
+    # what actually went wrong, only that the script stopped. Log the real
+    # exception (falling back to a direct file write if Write-Log itself
+    # isn't available/fails, e.g. an error before it's defined) before
+    # stopping the transcript, so the failure is actually traceable.
+    $trapMsg = "FATAL: Unhandled error: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
+    try { Write-Log $trapMsg 'Error' } catch { try { Add-Content -Path $LogPath -Value "$(Get-Date -Format 'u') $trapMsg" -ErrorAction SilentlyContinue } catch {} }
+    try { Stop-Transcript } catch { }
+    exit 1
+}
 
 function Write-Log {
     param([string]$Msg,[ValidateSet('Information','Warning','Error')]$Level='Information')
@@ -40,6 +51,10 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 Start-Transcript -Path $LogPath -Append
 $ScriptStart = Get-Date
+
+# Don't rely on the OS/.NET default protocol for the support.microsoft.com
+# scrape below - freshly-imaged machines may not yet default to TLS 1.2.
+if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
 
 # ── Build gate ────────────────────────────────────────────────────────────
 # Pinned to the known-good fixed build for CVE-2023-24932 on Windows 10

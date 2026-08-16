@@ -22,10 +22,19 @@
 .PARAMETER TicketReference
     Ticket/case number for this exception. Not required, but without one
     there's no way to trace the change back to an approved request later.
+
+.PARAMETER Force
+    Skip the automated Red Lion software/driver detection check and disable
+    HVCI anyway. Only use this after independently confirming Red Lion
+    software is actually installed on this machine (e.g. under a product
+    name the detection check doesn't recognize) - this script disables a
+    kernel security control and should not run on machines that don't need
+    the exception.
 #>
 param(
     [string]$Reason = "Red Lion software compatibility (HVCI conflicts with Red Lion drivers)",
-    [string]$TicketReference = ""
+    [string]$TicketReference = "",
+    [switch]$Force
 )
 
 Set-StrictMode -Version Latest
@@ -47,7 +56,31 @@ function Write-AuditEntry {
             New-EventLog -LogName Application -Source $EventSource
         }
         Write-EventLog -LogName Application -Source $EventSource -EventId 7000 -EntryType Warning -Message $line
-    } catch {}
+    } catch { Write-Verbose "Failed to write Windows Application event log entry: $($_.Exception.Message)" }
+}
+
+function Test-RedLionSoftwarePresent {
+    # No existing Red Lion detection logic exists elsewhere in this script,
+    # so this checks the two places Red Lion's Crimson/driver-based software
+    # would normally show up: the standard installed-program uninstall keys
+    # (32-bit and 64-bit) by display name, and loaded system drivers by
+    # name, in case it was installed without a matching uninstall entry.
+    $uninstallKeyPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($path in $uninstallKeyPaths) {
+        $match = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match 'Red\s*Lion' }
+        if ($match) { return $true }
+    }
+
+    $driverMatch = Get-CimInstance -ClassName Win32_SystemDriver -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match 'RedLion' -or $_.DisplayName -match 'Red\s*Lion' }
+    if ($driverMatch) { return $true }
+
+    return $false
 }
 
 if (-not $TicketReference) {
@@ -56,6 +89,17 @@ if (-not $TicketReference) {
     # and re-evaluate this machine later.
     Write-Host "NOTE: No -TicketReference supplied. Disabling a security control without a" -ForegroundColor Yellow
     Write-Host "tracked ticket makes it harder to find/revisit this exception later." -ForegroundColor Yellow
+}
+
+$redLionDetected = Test-RedLionSoftwarePresent
+if (-not $redLionDetected) {
+    if (-not $Force) {
+        Write-Host "No Red Lion software or driver was detected on this machine (checked installed-program uninstall keys and system drivers for a 'Red Lion' name match)." -ForegroundColor Yellow
+        Write-AuditEntry "ABORTED: No Red Lion software detected and -Force was not supplied; HVCI left unchanged."
+        throw "No Red Lion software was detected on this machine. This script disables a kernel security control (HVCI) and should only be run where the Red Lion compatibility exception is actually needed. Re-run with -Force if you have independently verified Red Lion software is installed under a name this check doesn't recognize."
+    }
+    Write-Host "WARNING: No Red Lion software was detected, but -Force was supplied - proceeding anyway." -ForegroundColor Yellow
+    Write-AuditEntry "WARNING: Proceeding without detected Red Lion software because -Force was supplied."
 }
 
 if (-not (Test-Path $RegistryPath)) {

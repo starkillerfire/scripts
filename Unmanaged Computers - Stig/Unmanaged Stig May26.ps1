@@ -111,6 +111,16 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$AllowBroadRemediationWithResultTargeting,
 
+    # This script lives under "Unmanaged Computers" and is written for
+    # standalone, non-domain machines - its BitLocker/account-rename/local
+    # security policy changes are not coordinated with any domain GPO and
+    # can conflict with (or be silently overwritten by) domain policy on a
+    # domain-joined box. It hard-stops when domain-join is detected unless
+    # this is passed, for the rare legitimate case of intentionally running
+    # it on a domain-joined machine.
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowDomainJoined,
+
     [Parameter(Mandatory = $false)]
     [switch]$SkipPreCheck,
 
@@ -224,6 +234,24 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Write-Warning 'This script requires administrator privileges. Relaunching elevated...'
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
     $needsPinPrompt = $false
+    # Any string value is wrapped in "..." as its own $argList element - safe
+    # for spaces, but a literal embedded double-quote breaks out of the
+    # intended single argument, and a trailing odd-count of backslashes
+    # escapes the closing quote, both silently corrupting the relaunch's
+    # argument list (confirmed against Reset_Fire_Laptop.ps1's self-elevation,
+    # which had the same unvalidated pattern before its own fix). A literal "
+    # can never legally appear in a real Windows path anyway, so reject rather
+    # than try to escape it.
+    function Test-SafeElevationArg ([string]$Key, [string]$Val) {
+        if ($Val.Contains('"')) {
+            Write-Error "-$Key contains a double-quote character, which can never legally appear in a real Windows path and cannot be safely passed through to the elevated relaunch. Remove it and try again. Value: $Val"
+            exit 1
+        }
+        if ($Val -match '\\+$' -and ($Matches[0].Length % 2) -eq 1) {
+            Write-Error "-$Key ends in a single trailing backslash, which escapes the closing quote when passed through to the elevated relaunch and corrupts the argument list. Remove the trailing backslash (or double it) and try again. Value: $Val"
+            exit 1
+        }
+    }
     foreach ($key in $PSBoundParameters.Keys) {
         $val = $PSBoundParameters[$key]
         if ($val -is [switch]) {
@@ -232,8 +260,12 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
             Write-Warning "Parameter -$key (SecureString) cannot be forwarded when relaunching elevated - the elevated instance will prompt for it instead."
             if ($key -eq 'StartupPin') { $needsPinPrompt = $true }
         } elseif ($val -is [string[]]) {
-            foreach ($item in $val) { $argList += "-$key", "`"$item`"" }
+            foreach ($item in $val) {
+                Test-SafeElevationArg -Key $key -Val $item
+                $argList += "-$key", "`"$item`""
+            }
         } else {
+            Test-SafeElevationArg -Key $key -Val "$val"
             $argList += "-$key", "`"$val`""
         }
     }
@@ -564,7 +596,7 @@ function Backup-PerUserRegistryValue {
     $backupFile = Join-Path $perUserBackupDir $safeFileName
     try {
         Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('export', $RegExeHivePath, $backupFile, '/y') -IgnoreExitCode | Out-Null
-    } catch { }
+    } catch { Write-Warning "Failed to export per-user registry backup for '$RegExeHivePath' to '$backupFile': $($_.Exception.Message)" }
 }
 
 function Set-PerUserRegistryValue {
@@ -837,6 +869,53 @@ function Rename-BuiltInAccounts {
 #endregion Domain, Security Template & Certificates
 
 #region BitLocker, Time & LAPS
+function Export-StigBitLockerRecoveryKey {
+    # These are unmanaged, non-domain machines with no AD/Azure AD escrow of
+    # BitLocker recovery keys. If a protector is added/enabled here and the
+    # recovery password is never captured, a later BitLocker recovery prompt
+    # means permanent data loss. Save it alongside the pre-change backup
+    # package and print it clearly so an operator running interactively can
+    # record it on the spot.
+    param([Parameter(Mandatory)][string]$MountPoint)
+
+    $volume = Get-BitLockerVolume -MountPoint $MountPoint -ErrorAction SilentlyContinue
+    $recoveryProtectors = $volume.KeyProtector | Where-Object KeyProtectorType -eq 'RecoveryPassword'
+    if (-not $recoveryProtectors) {
+        Add-OutstandingItem "BitLocker was enabled/updated on $MountPoint but no RecoveryPassword protector could be found to export. Record the recovery key manually - this machine has no AD/Azure AD escrow."
+        return
+    }
+
+    $destDir = if ($script:BackupPath) { $script:BackupPath } else { $BackupRoot }
+    New-StigDirectory -Path $destDir
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $safeMount = ($MountPoint -replace '[^A-Za-z0-9]', '')
+    $keyPath = Join-Path $destDir "BitLocker_RecoveryKey_${safeMount}_$stamp.txt"
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("BitLocker recovery key(s) for $MountPoint on $env:COMPUTERNAME")
+    $lines.Add("Captured: $(Get-Date -Format o)")
+    $lines.Add('')
+    foreach ($rp in $recoveryProtectors) {
+        $lines.Add("KeyProtectorId: $($rp.KeyProtectorId)")
+        $lines.Add("RecoveryPassword: $($rp.RecoveryPassword)")
+        $lines.Add('')
+    }
+    Set-Content -Path $keyPath -Value $lines -Encoding UTF8
+
+    Write-Host ''
+    Write-Host ('*' * 90) -ForegroundColor Red
+    Write-Host "BITLOCKER RECOVERY KEY(S) FOR $MountPoint - RECORD THIS NOW" -ForegroundColor Yellow
+    foreach ($rp in $recoveryProtectors) {
+        Write-Host "  $($rp.RecoveryPassword)" -ForegroundColor Yellow
+    }
+    Write-Host "Saved to: $keyPath" -ForegroundColor Yellow
+    Write-Host 'This machine is unmanaged/non-domain - there is no AD/Azure AD escrow of this key. If it is lost, the data is unrecoverable.' -ForegroundColor Red
+    Write-Host ('*' * 90) -ForegroundColor Red
+    Write-Host ''
+
+    Add-OutstandingItem "BitLocker recovery key for $MountPoint was exported to $keyPath - move it off this machine to a secure location; it is not escrowed anywhere else."
+}
+
 function Invoke-BitLockerRemediation {
     param([Parameter(Mandatory)][securestring]$Pin)
 
@@ -872,6 +951,7 @@ function Invoke-BitLockerRemediation {
                 }
                 if (-not $hasTpmPin) {
                     Add-BitLockerKeyProtector -MountPoint $mount -Pin $Pin -TpmAndPinProtector -ErrorAction Stop | Out-Null
+                    Export-StigBitLockerRecoveryKey -MountPoint $mount
                     # A TPM-only protector left in place would let Windows boot
                     # without the PIN via that older protector, silently
                     # defeating the TPM+PIN requirement this just added - it
@@ -890,9 +970,11 @@ function Invoke-BitLockerRemediation {
 
         if ($volume.VolumeType -eq 'OperatingSystem') {
             Enable-BitLocker -MountPoint $mount -EncryptionMethod XtsAes256 -TpmAndPinProtector -Pin $Pin -RecoveryPasswordProtector -SkipHardwareTest -ErrorAction Stop | Out-Null
+            Export-StigBitLockerRecoveryKey -MountPoint $mount
         }
         else {
             Enable-BitLocker -MountPoint $mount -EncryptionMethod XtsAes256 -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+            Export-StigBitLockerRecoveryKey -MountPoint $mount
             Enable-BitLockerAutoUnlock -MountPoint $mount -ErrorAction SilentlyContinue | Out-Null
         }
     }
@@ -1286,7 +1368,7 @@ function Export-FirewallScopePreview {
         try {
             $addr = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
             $currentAddress = ($addr.RemoteAddress -join ',')
-        } catch { }
+        } catch { Write-Warning "Could not determine current remote address filter for firewall rule '$($rule.Name)': $($_.Exception.Message)" }
         $rows.Add([pscustomobject]@{
             Name                  = $rule.Name
             DisplayName           = $rule.DisplayName
@@ -2223,17 +2305,19 @@ function Invoke-PowerStigBaseline {
     $m2 = [regex]::Match((Split-Path -Leaf $orgDefault), 'WindowsClient-11-(?<ver>[0-9\.]+)\.org\.default\.xml', 'IgnoreCase')
     if ($m2.Success) { $stigVersion = $m2.Groups['ver'].Value }
 
-    # The two Configuration blocks below are built as a STRING and parsed
-    # via Invoke-Expression rather than being written as literal Configuration
-    # keywords in this script's own source. PowerShell resolves
-    # "Import-DscResource -ModuleName PowerSTIG" at PARSE time for a literal
-    # Configuration block - meaning this entire script would fail to even
-    # load ("Could not find the module 'PowerSTIG'") on any machine where
-    # PowerSTIG isn't already installed, before the Install-Module logic
-    # above ever got a chance to run. That defeats the whole point of this
-    # script installing its own PowerSTIG dependency on a fresh, unmanaged
-    # machine. Deferring the parse to this string - reached only after
-    # $psStigModule is confirmed present, a few lines above - fixes that.
+    # The two Configuration blocks below are built as a STRING rather than
+    # being written as literal Configuration keywords in this script's own
+    # source. PowerShell resolves "Import-DscResource -ModuleName PowerSTIG"
+    # at PARSE time for a literal Configuration block - meaning this entire
+    # script would fail to even load ("Could not find the module
+    # 'PowerSTIG'") on any machine where PowerSTIG isn't already installed,
+    # before the Install-Module logic above ever got a chance to run. That
+    # defeats the whole point of this script installing its own PowerSTIG
+    # dependency on a fresh, unmanaged machine. Deferring the parse to this
+    # string - reached only after $psStigModule is confirmed present, a few
+    # lines above - fixes that. It's written to a temp .ps1 file and
+    # dot-sourced (rather than run via Invoke-Expression) below so it's
+    # parsed/executed as a normal script file instead of an arbitrary string.
     $dscConfigText = @'
 [DSCLocalConfigurationManager()]
 Configuration LCM_PushConfig {
@@ -2259,12 +2343,17 @@ Configuration Win11_STIG_Baseline {
     }
 }
 '@
+    $tempDscConfigPath = Join-Path $env:TEMP ("StigDscConfig_{0}.ps1" -f [guid]::NewGuid().Guid)
     try {
-        Invoke-Expression $dscConfigText
+        Set-Content -Path $tempDscConfigPath -Value $dscConfigText -Encoding UTF8
+        . $tempDscConfigPath
     }
     catch {
         Add-OutstandingItem "Failed to parse the PowerSTIG DSC configuration: $($_.Exception.Message)"
         return
+    }
+    finally {
+        Remove-Item -Path $tempDscConfigPath -Force -ErrorAction SilentlyContinue
     }
 
     $lcmPath = Join-Path $env:ProgramData 'PowerSTIG\LCM'
@@ -2682,7 +2771,7 @@ function Test-StigRegistryActionState {
     $expected = $Action.Value
     $actualForCompare = $actual
     if ($expected -is [int] -or $expected -is [long] -or ([string]$expected -match '^-?\d+$')) {
-        try { $actualForCompare = [int64]$actual; $expected = [int64]$expected } catch { }
+        try { $actualForCompare = [int64]$actual; $expected = [int64]$expected } catch { Write-Verbose "Could not coerce registry value '$providerPath :: $($Action.Name)' to int64 for comparison; falling back to string comparison. $($_.Exception.Message)" }
     }
 
     $pass = $false
@@ -2903,6 +2992,22 @@ try {
         }
     }
 
+    # This script is intended for standalone, non-domain machines (see the
+    # "Unmanaged Computers" folder it lives in) - BitLocker, account-rename,
+    # and local security policy changes below are not domain-GPO aware and
+    # can conflict with or be overwritten by domain policy. Warn loudly, and
+    # hard-stop unless -AllowDomainJoined was explicitly passed for the rare
+    # legitimate case of running it on a domain-joined box.
+    $domainCheckContext = Get-DomainContext
+    if ($domainCheckContext.PartOfDomain) {
+        $domainWarning = "This machine is joined to domain '$($domainCheckContext.DomainName)'. This script is written for unmanaged, non-domain machines - its BitLocker/account-rename/local security policy changes are not coordinated with domain GPO and may conflict with it."
+        Write-Warning $domainWarning
+        Add-OutstandingItem $domainWarning
+        if (-not $AllowDomainJoined) {
+            throw "$domainWarning Re-run with -AllowDomainJoined if running this on a domain-joined machine is intentional."
+        }
+    }
+
     Write-Section 'Starting comprehensive Windows 11 STIG remediation'
     $resolvedScap = Resolve-ScapXmlPath
     Import-ScapContent -Path $resolvedScap
@@ -2998,13 +3103,32 @@ try {
     else {
         Invoke-PowerStigBaseline
         Invoke-LocalSecurityPolicyRemediation
+
+        # Rename-BuiltInAccounts (renames the built-in Administrator/Guest
+        # accounts) and Invoke-BitLockerRemediation (rewrites BitLocker
+        # protectors) are destructive and hard to reverse. -InteractiveMenu
+        # already walks the operator through consenting to these up front;
+        # outside that menu (e.g. straight CLI/unattended invocation) gate
+        # them behind the same Read-StigYesNo confirmation pattern used
+        # elsewhere in this script (see -UseEveryoneForDenyRdp above), or
+        # require -Force to skip the prompt.
+        $confirmedDestructiveChanges = $true
+        if (-not $InteractiveMenu -and -not $Force) {
+            $confirmedDestructiveChanges = Read-StigYesNo -Prompt 'About to rename the built-in Administrator/Guest accounts and rewrite BitLocker protectors (TPM+PIN / recovery password) on this machine. These changes are destructive and hard to reverse. Proceed?' -DefaultYes $false
+        }
+
         # Unlike its sibling remediation functions, this had no local
         # try/catch - an exception here (e.g. Rename-LocalUser blocked by
         # policy) would propagate to the outer Main catch and skip every
         # remaining remediation step below, including the BitLocker PIN
         # enablement and the post-reboot validation marker.
-        try { Rename-BuiltInAccounts }
-        catch { Add-OutstandingItem "Renaming built-in Administrator/Guest accounts failed: $($_.Exception.Message)" }
+        if ($confirmedDestructiveChanges) {
+            try { Rename-BuiltInAccounts }
+            catch { Add-OutstandingItem "Renaming built-in Administrator/Guest accounts failed: $($_.Exception.Message)" }
+        }
+        else {
+            Add-OutstandingItem 'Renaming built-in Administrator/Guest accounts was skipped - operator declined the confirmation prompt (use -InteractiveMenu or -Force to proceed without prompting).'
+        }
         Invoke-FeatureAndServiceRemediation
         Invoke-HardCodedRegistryRemediation
         Invoke-ScapDrivenRegistryRemediation
@@ -3015,7 +3139,7 @@ try {
         Invoke-CertificateRemediation
         Invoke-FirewallScopeRemediation
 
-        if ($null -ne $StartupPin) {
+        if ($null -ne $StartupPin -and $confirmedDestructiveChanges) {
             Suspend-StigTranscript
             # A failure here (e.g. Add-BitLockerKeyProtector/Enable-BitLocker
             # erroring on a PIN/hardware issue) used to propagate straight to
@@ -3026,6 +3150,9 @@ try {
             try { Invoke-BitLockerRemediation -Pin $StartupPin }
             catch { Add-OutstandingItem "BitLocker TPM+PIN remediation failed: $($_.Exception.Message)" }
             finally { Resume-StigTranscript }
+        }
+        elseif ($null -ne $StartupPin) {
+            Add-OutstandingItem 'BitLocker TPM+PIN remediation was skipped - operator declined the confirmation prompt (use -InteractiveMenu or -Force to proceed without prompting).'
         }
         else {
             Add-OutstandingItem 'BitLocker TPM+PIN policy was written, but full BitLocker TPM+PIN enablement was not completed because -StartupPin was not supplied.'
@@ -3066,9 +3193,9 @@ catch {
     Write-Host "FATAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor Red
 
-    try { Invoke-StigValidationSummary } catch {}
-    try { Write-StigOperatorSummary -OutputRoot $ReportRoot } catch {}
-    try { Invoke-EndOfRunReportActions } catch {}
+    try { Invoke-StigValidationSummary } catch { Write-Host "Invoke-StigValidationSummary also failed while handling the fatal error above: $($_.Exception.Message)" -ForegroundColor Red }
+    try { Write-StigOperatorSummary -OutputRoot $ReportRoot } catch { Write-Host "Write-StigOperatorSummary also failed while handling the fatal error above: $($_.Exception.Message)" -ForegroundColor Red }
+    try { Invoke-EndOfRunReportActions } catch { Write-Host "Invoke-EndOfRunReportActions also failed while handling the fatal error above: $($_.Exception.Message)" -ForegroundColor Red }
 
     throw
 }
