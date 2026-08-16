@@ -47,6 +47,12 @@ if (-not $isAdmin) {
     Write-Host "Not running as Administrator - relaunching elevated..." -ForegroundColor Yellow
     $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
     if ($Force) { $argList += " -Force" }
+    # -WhatIf/-Confirm are automatic parameters from SupportsShouldProcess, not
+    # in $Force above - previously they were silently dropped on relaunch, so
+    # running this non-elevated with -WhatIf (the normal way a technician would
+    # preview it) still performed real deletions once UAC elevated it.
+    if ($WhatIfPreference) { $argList += " -WhatIf" }
+    if ($PSBoundParameters.ContainsKey('Confirm')) { $argList += " -Confirm:`$$($PSBoundParameters['Confirm'])" }
     Start-Process powershell.exe -ArgumentList $argList -Verb RunAs
     exit
 }
@@ -100,7 +106,7 @@ function Backup-RegKey ([string]$path) {
         $safeName   = ($regPath -replace '[\\:\{\}\s\(\)]', '_') -replace '_+', '_'
         $backupFile = Join-Path $backupDir "$safeName.reg"
         $null = & reg.exe export $regPath $backupFile /y 2>&1
-    } catch { }  # Backup failure must never block removal
+    } catch { Write-Warn "Registry backup of '$path' failed: $($_.Exception.Message)" }  # Backup failure must never block removal
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -219,7 +225,7 @@ Get-ChildItem -Path 'HKU:\' -ErrorAction SilentlyContinue | Where-Object {
         $ntAccount = ([System.Security.Principal.SecurityIdentifier]$sid).Translate(
                          [System.Security.Principal.NTAccount])
         $label = "HKU\$($ntAccount.Value.Split('\')[-1])"
-    } catch { }
+    } catch { Write-Warn "Could not resolve SID '$sid' to a username: $($_.Exception.Message)" }
 
     # Skip the current user - already covered by HKCU scan above
     $currentSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
@@ -309,8 +315,11 @@ Write-Section "Step 3: Removing selected entries"
 $removedItems = [System.Collections.Generic.List[string]]::new()
 $failedItems  = [System.Collections.Generic.List[string]]::new()
 
-function Remove-RegKey ([string]$path, [string]$label) {
+function Remove-RegKey {
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$path, [string]$label)
     if (Test-Path $path) {
+        if (-not $PSCmdlet.ShouldProcess($label, "Remove registry key")) { return }
         Backup-RegKey $path
         try {
             Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
@@ -323,7 +332,10 @@ function Remove-RegKey ([string]$path, [string]$label) {
     }
 }
 
-function Remove-RegValue ([string]$keyPath, [string]$valueName) {
+function Remove-RegValue {
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$keyPath, [string]$valueName)
+    if (-not $PSCmdlet.ShouldProcess("$keyPath -> $valueName", "Remove registry value")) { return }
     Backup-RegKey $keyPath
     try {
         Remove-ItemProperty -Path $keyPath -Name $valueName -Force -ErrorAction Stop
@@ -339,13 +351,15 @@ foreach ($entry in @($toRemove)) {
     Write-Info "Removing: '$($entry.PrinterName)' | GUID: $($entry.GUID) | $($entry.Source)"
     switch ($entry.EntryType) {
         'Spooler' {
-            try {
-                Remove-Printer -Name $entry.PrinterName -Confirm:$false -ErrorAction Stop
-                Write-OK "Removed from spooler: $($entry.PrinterName)"
-                $removedItems.Add("Spooler: $($entry.PrinterName)") | Out-Null
-            } catch {
-                Write-Fail "Could not remove '$($entry.PrinterName)' from spooler: $_"
-                $failedItems.Add("Spooler: $($entry.PrinterName)") | Out-Null
+            if ($PSCmdlet.ShouldProcess($entry.PrinterName, "Remove from spooler")) {
+                try {
+                    Remove-Printer -Name $entry.PrinterName -Confirm:$false -ErrorAction Stop
+                    Write-OK "Removed from spooler: $($entry.PrinterName)"
+                    $removedItems.Add("Spooler: $($entry.PrinterName)") | Out-Null
+                } catch {
+                    Write-Fail "Could not remove '$($entry.PrinterName)' from spooler: $_"
+                    $failedItems.Add("Spooler: $($entry.PrinterName)") | Out-Null
+                }
             }
         }
         'Key' {
@@ -380,13 +394,15 @@ if ($uniqueDrivers.Count -gt 0) {
             Out-GridView -Title "Orphaned Printer Drivers - Select to remove (optional), or Cancel to skip" -PassThru
 
         foreach ($d in @($selectedDrivers)) {
-            try {
-                Remove-PrinterDriver -Name $d.'Driver Name' -ErrorAction Stop
-                Write-OK "Removed driver: $($d.'Driver Name')"
-                $removedItems.Add("Driver: $($d.'Driver Name')") | Out-Null
-            } catch {
-                Write-Fail "Could not remove driver '$($d.'Driver Name')': $_"
-                $failedItems.Add("Driver: $($d.'Driver Name')") | Out-Null
+            if ($PSCmdlet.ShouldProcess($d.'Driver Name', "Remove printer driver")) {
+                try {
+                    Remove-PrinterDriver -Name $d.'Driver Name' -ErrorAction Stop
+                    Write-OK "Removed driver: $($d.'Driver Name')"
+                    $removedItems.Add("Driver: $($d.'Driver Name')") | Out-Null
+                } catch {
+                    Write-Fail "Could not remove driver '$($d.'Driver Name')': $_"
+                    $failedItems.Add("Driver: $($d.'Driver Name')") | Out-Null
+                }
             }
         }
     } else {
@@ -421,13 +437,15 @@ if ($uniquePorts.Count -gt 0) {
             Out-GridView -Title "Orphaned Printer Ports - Select to remove (optional), or Cancel to skip" -PassThru
 
         foreach ($port in @($selectedPorts)) {
-            try {
-                Remove-PrinterPort -Name $port.'Port Name' -ErrorAction Stop
-                Write-OK "Removed port: $($port.'Port Name')"
-                $removedItems.Add("Port: $($port.'Port Name')") | Out-Null
-            } catch {
-                Write-Fail "Could not remove port '$($port.'Port Name')': $_"
-                $failedItems.Add("Port: $($port.'Port Name')") | Out-Null
+            if ($PSCmdlet.ShouldProcess($port.'Port Name', "Remove printer port")) {
+                try {
+                    Remove-PrinterPort -Name $port.'Port Name' -ErrorAction Stop
+                    Write-OK "Removed port: $($port.'Port Name')"
+                    $removedItems.Add("Port: $($port.'Port Name')") | Out-Null
+                } catch {
+                    Write-Fail "Could not remove port '$($port.'Port Name')': $_"
+                    $failedItems.Add("Port: $($port.'Port Name')") | Out-Null
+                }
             }
         }
     } else {
@@ -442,27 +460,32 @@ if ($uniquePorts.Count -gt 0) {
 # ────────────────────────────────────────────────────────────────────────────────
 Write-Section "Step 6: Restarting Print Spooler"
 
-try {
-    Write-Info "Stopping Spooler..."
-    Stop-Service -Name Spooler -Force -ErrorAction Stop
-    Write-Info "Starting Spooler..."
-    Start-Service -Name Spooler -ErrorAction Stop
-    Write-OK "Print Spooler restarted."
-} catch {
-    Write-Fail "Could not restart Spooler: $_"
-    # One retry after a short delay before giving up - a handle transiently
-    # held by another process during Stop-Service is common enough that a
-    # short-delayed Start-Service retry often succeeds. If it still fails,
-    # this needs to be visible in the final summary (not just scrolled past
-    # in the console) - a stopped Print Spooler means printing is completely
-    # broken on this machine with no other automatic recovery.
-    Start-Sleep -Seconds 5
+# Was unconditional - a real service disruption (stop+start) even under
+# -WhatIf with items "selected" but not actually changed, despite no
+# registry/printer/driver/port change having occurred.
+if ($PSCmdlet.ShouldProcess("Print Spooler service", "Restart")) {
     try {
+        Write-Info "Stopping Spooler..."
+        Stop-Service -Name Spooler -Force -ErrorAction Stop
+        Write-Info "Starting Spooler..."
         Start-Service -Name Spooler -ErrorAction Stop
-        Write-OK "Print Spooler started on retry."
+        Write-OK "Print Spooler restarted."
     } catch {
-        Write-Fail "Print Spooler could not be restarted after retry: $_"
-        $failedItems.Add('Spooler service is NOT RUNNING - printing is broken on this machine. Manual intervention required.') | Out-Null
+        Write-Fail "Could not restart Spooler: $_"
+        # One retry after a short delay before giving up - a handle transiently
+        # held by another process during Stop-Service is common enough that a
+        # short-delayed Start-Service retry often succeeds. If it still fails,
+        # this needs to be visible in the final summary (not just scrolled past
+        # in the console) - a stopped Print Spooler means printing is completely
+        # broken on this machine with no other automatic recovery.
+        Start-Sleep -Seconds 5
+        try {
+            Start-Service -Name Spooler -ErrorAction Stop
+            Write-OK "Print Spooler started on retry."
+        } catch {
+            Write-Fail "Print Spooler could not be restarted after retry: $_"
+            $failedItems.Add('Spooler service is NOT RUNNING - printing is broken on this machine. Manual intervention required.') | Out-Null
+        }
     }
 }
 
@@ -540,6 +563,14 @@ if ($removedItems.Count -eq 0) {
     switch ($rebootAnswer) {
         'Yes' {
             Write-Info "Rebooting now..."
+            # FIX 4: a shutdown /r /t 300 is already pending from above.
+            # Without cancelling it first, this second scheduled shutdown is
+            # rejected by shutdown.exe (error 1190 - a shutdown is already in
+            # progress) and silently no-ops, leaving the machine on the
+            # original 5-minute timer instead of rebooting now. 2>$null
+            # suppresses the harmless "no shutdown to abort" case if the
+            # first schedule didn't stick for some reason.
+            shutdown /a 2>$null
             shutdown /r /t 0 /c "UP Printer Cleanup: user requested immediate reboot"
         }
         'No' {
@@ -555,3 +586,9 @@ if ($removedItems.Count -eq 0) {
         }
     }
 }
+
+# Previously the script just fell off the end here, so its exit code was
+# whatever native command last set $LASTEXITCODE (e.g. shutdown.exe) rather
+# than a true success/failure signal - the launcher .bat's %errorlevel% check
+# was checking noise, not this script's actual outcome.
+exit $(if ($failedItems.Count -gt 0) { 1 } else { 0 })

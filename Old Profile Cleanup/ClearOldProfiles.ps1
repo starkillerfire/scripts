@@ -29,7 +29,13 @@
 .EXAMPLE
     .\ClearOldProfiles.ps1 -CsvPath C:\computers.csv -DaysInactive 60 -LogPath C:\Logs\profiles.log
 #>
-[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+# 'Medium' here matches the fix already applied to the nested
+# Clear-OldProfilesOnMachine function below (which is the one that actually
+# calls ShouldProcess) - this outer scope doesn't call ShouldProcess itself,
+# so 'High' here was harmless today, but left as-is it's a trap for a future
+# maintainer who adds a ShouldProcess call up here and reintroduces the same
+# non-interactive hang.
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
     [string] $ComputerName,
     [string] $CsvPath,
@@ -51,7 +57,13 @@ function Write-Log {
 }
 
 function Clear-OldProfilesOnMachine {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    # FIX 2: ConfirmImpact = 'High' matched the default $ConfirmPreference of
+    # 'High', so ShouldProcess auto-prompted on every deletion unless the
+    # caller passed -Confirm:$false - which hangs/throws under a
+    # non-interactive SYSTEM/Intune context. 'Medium' is below the default
+    # $ConfirmPreference threshold, so ShouldProcess no longer prompts
+    # automatically while -WhatIf/-Confirm still work if explicitly requested.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([string]$TargetComputer)
 
     Write-Log "Processing: $TargetComputer"
@@ -90,25 +102,31 @@ function Clear-OldProfilesOnMachine {
     $cutoff = (Get-Date).AddDays(-$DaysInactive)
 
     foreach ($userProfile in $profiles) {
-        $lastUse = $userProfile.LastUseTime
-        $age     = [int]((Get-Date) - $lastUse).TotalDays
+        # FIX 2 (continued): the try/catch used to wrap only the
+        # Invoke-CimMethod call, so a ShouldProcess-related terminating
+        # error (e.g. still thrown if a caller forces -Confirm under a host
+        # that can't prompt) escaped uncaught and aborted every remaining
+        # profile/machine. Widening it around ShouldProcess itself means one
+        # bad prompt/profile no longer takes down the rest of the run.
+        try {
+            $lastUse = $userProfile.LastUseTime
+            $age     = [int]((Get-Date) - $lastUse).TotalDays
 
-        if ($userProfile.Loaded) {
-            Write-Log "KEPT     $($userProfile.LocalPath) on $TargetComputer (currently loaded/logged on - never deleted regardless of age)"
-            continue
-        }
+            if ($userProfile.Loaded) {
+                Write-Log "KEPT     $($userProfile.LocalPath) on $TargetComputer (currently loaded/logged on - never deleted regardless of age)"
+                continue
+            }
 
-        if ($lastUse -lt $cutoff) {
-            if ($PSCmdlet.ShouldProcess("$TargetComputer - $($userProfile.LocalPath)", "Delete profile (last used $($lastUse.ToString('yyyy-MM-dd')), $age days ago)")) {
-                try {
+            if ($lastUse -lt $cutoff) {
+                if ($PSCmdlet.ShouldProcess("$TargetComputer - $($userProfile.LocalPath)", "Delete profile (last used $($lastUse.ToString('yyyy-MM-dd')), $age days ago)")) {
                     Invoke-CimMethod -InputObject $userProfile -MethodName Delete -ErrorAction Stop | Out-Null
                     Write-Log "DELETED  $($userProfile.LocalPath) on $TargetComputer (last used $($lastUse.ToString('yyyy-MM-dd')), $age days)"
-                } catch {
-                    Write-Log "Failed to delete $($userProfile.LocalPath) on ${TargetComputer}: $($_.Exception.Message)" 'ERROR'
                 }
+            } else {
+                Write-Log "KEPT     $($userProfile.LocalPath) on $TargetComputer (last used $($lastUse.ToString('yyyy-MM-dd')), $age days)"
             }
-        } else {
-            Write-Log "KEPT     $($userProfile.LocalPath) on $TargetComputer (last used $($lastUse.ToString('yyyy-MM-dd')), $age days)"
+        } catch {
+            Write-Log "Failed to process $($userProfile.LocalPath) on ${TargetComputer}: $($_.Exception.Message)" 'ERROR'
         }
     }
 

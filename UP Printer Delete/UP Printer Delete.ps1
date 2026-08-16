@@ -8,7 +8,13 @@
    10) -ForceSwitchAccount to prompt early
 #>
 
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
+# ConfirmImpact was 'High', which matches the default $ConfirmPreference of
+# 'High' - every ShouldProcess call below auto-prompted for confirmation,
+# which hangs/throws under any non-interactive invocation (same root cause
+# already fixed in ClearOldProfiles.ps1, left unpatched here). 'Medium' sits
+# below the default threshold so ShouldProcess no longer prompts
+# automatically, while -WhatIf/-Confirm still work if explicitly requested.
+[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
 param(
   [switch]$DryRun,
   # Defaults to PrinterNames.txt beside this script (one name per line) -
@@ -68,7 +74,7 @@ try {
       if ((Get-PSRepository -Name PSGallery).InstallationPolicy -ne 'Trusted') {
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
       }
-    } catch {}
+    } catch { Write-Warning "Could not verify/set PSGallery repository trust: $($_.Exception.Message)" }
     Install-Module -Name UniversalPrintManagement -MinimumVersion 1.0.7 -Scope CurrentUser -Force
   }
   Import-Module UniversalPrintManagement -ErrorAction Stop
@@ -250,25 +256,35 @@ function Invoke-RemoveUPPrinterShare {
 }
 
 # ---- Pull all printers and shares (loop continuation tokens) ----
+# FIX 5: under Set-StrictMode -Version Latest, $r.Results / $r.ContinuationToken
+# throw a PropertyNotFoundException outright if the response shape from
+# Get-UPPrinter/Get-UPPrinterShare doesn't have that property (e.g. a module
+# update changes the return shape) - which would abort the whole run before
+# any deletion happens. Checking PSObject.Properties.Name first lets a shape
+# mismatch degrade to "treat $r itself as the result" instead of crashing.
+function Test-UPHasProperty {
+  param([object]$Object, [string]$Name)
+  return ($null -ne $Object) -and ($Object.PSObject.Properties.Name -contains $Name)
+}
 function Get-AllUPPrinters {
   $all=@(); $r=$null
   $r = Invoke-UP { Get-UPPrinter }
-  if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
-  while ($r -and $r.ContinuationToken) {
+  if ((Test-UPHasProperty $r 'Results') -and $null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+  while ($r -and (Test-UPHasProperty $r 'ContinuationToken') -and $r.ContinuationToken) {
     $tok = $r.ContinuationToken
     $r = Invoke-UP { Get-UPPrinter -ContinuationToken $tok }
-    if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+    if ((Test-UPHasProperty $r 'Results') -and $null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
   }
   $all
 }
 function Get-AllUPPrinterShares {
   $all=@(); $r=$null
   $r = Invoke-UP { Get-UPPrinterShare }
-  if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
-  while ($r -and $r.ContinuationToken) {
+  if ((Test-UPHasProperty $r 'Results') -and $null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+  while ($r -and (Test-UPHasProperty $r 'ContinuationToken') -and $r.ContinuationToken) {
     $tok = $r.ContinuationToken
     $r = Invoke-UP { Get-UPPrinterShare -ContinuationToken $tok }
-    if ($null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
+    if ((Test-UPHasProperty $r 'Results') -and $null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
   }
   $all
 }
@@ -340,9 +356,10 @@ foreach ($p in $printersToDelete) {
 
   foreach ($s in $shares) {
     if ($DryRun) {
-      if ($PSCmdlet.ShouldProcess(("Share '{0}'" -f $s.DisplayName), "Remove-UPPrinterShare")) {
-        Write-UPLog $printerName $s.Id 'Unshare' 'DryRun' ("Would remove share '{0}'" -f $s.DisplayName)
-      }
+      # No ShouldProcess here - -DryRun previews without changing state, so
+      # it shouldn't be gated behind the same confirmation as a real delete
+      # (it previously was, defeating the point of a safe preview mode).
+      Write-UPLog $printerName $s.Id 'Unshare' 'DryRun' ("Would remove share '{0}'" -f $s.DisplayName)
       continue
     }
     try {
@@ -367,9 +384,8 @@ foreach ($p in $printersToDelete) {
 
   # Delete the printer
   if ($DryRun) {
-    if ($PSCmdlet.ShouldProcess(("Printer '{0}'" -f $printerName), "Remove-UPPrinter")) {
-      Write-UPLog $printerName $printerId 'DeletePrinter' 'DryRun' ("Would remove printer '{0}'" -f $printerName)
-    }
+    # No ShouldProcess here either - see the Unshare DryRun branch above.
+    Write-UPLog $printerName $printerId 'DeletePrinter' 'DryRun' ("Would remove printer '{0}'" -f $printerName)
     continue
   }
 
