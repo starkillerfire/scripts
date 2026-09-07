@@ -526,6 +526,154 @@
 #   Invoke-ForEachUserHive's `& $Action -Sid $sid -ProfilePath $path` call still binds fine
 #   against a scriptblock that only declares -Sid, since unmatched named arguments to a plain
 #   scriptblock are silently ignored rather than raising a binding error.
+# Date: 06-Sep-2026 Version 2.42 - Fixed a real user report: running this script was breaking
+#   application/network shortcuts on the Desktop and in the Start Menu/taskbar. Two distinct
+#   causes, both fixed:
+#   - Remove-UserPersonalFiles' Desktop wipe deleted every file in the folder indiscriminately,
+#     including .lnk/.url shortcuts - only the wallpaper picture was ever special-cased for
+#     preservation. Desktop shortcuts are pointers, not personal data, so the wipe now skips
+#     .lnk/.url specifically on the Desktop target while still fully wiping Documents/Pictures/
+#     Downloads/Videos/Music and everything else on the Desktop.
+#   - Reset-Personalization deleted LayoutModification.xml, the Start Menu Experience Host's
+#     LocalState, and the legacy taskbar pinned-items folder to force Windows to regenerate a
+#     default Start Menu/taskbar layout - which also destroyed any app deliberately pinned to
+#     Start or the taskbar (including org-deployed pins, not just the previous user's own
+#     customizations). Removed the function and its checklist entry entirely rather than leaving
+#     a neutered no-op behind; Clear-PinnedItems (Jump Lists/Recent Items/Quick Access pins) is
+#     unrelated and unaffected.
+# Date: 06-Sep-2026 Version 2.43 - Independent audit (fresh review, not self-reported) of the
+#   areas that had gotten the least scrutiny across 42 prior passes - the WinForms checklist, the
+#   Main execution flow, and the two most-reused helpers (Invoke-ForEachUserHive, Stop-
+#   ProcessAndWait) - found and fixed four real issues plus two cosmetic ones:
+#   - Invoke-ForEachUserHive had no per-profile error isolation: confirmed empirically that
+#     PowerShell aborts an entire ForEach-Object pipeline on one iteration's unhandled terminating
+#     exception, so a single profile's scriptblock throwing (e.g. a hive with unusual enumeration
+#     ACLs) silently skipped every remaining profile for that task, with only one logged error to
+#     show for it. Nearly every per-user cleanup function is built on this helper. Fixed by
+#     wrapping the per-profile action in its own try/catch (log-and-continue), separate from the
+#     existing finally that unloads the hive.
+#   - Invoke-CleanMgrAutomation's `Get-Process cleanmgr, dismhost | Wait-Process` had no timeout,
+#     unlike every other process-wait in this script (Stop-ProcessAndWait caps at 15s for exactly
+#     this reason) - dismhost.exe is known to occasionally wedge, which would stall ~20 remaining
+#     steps and the final reboot indefinitely. Bounded to 10 minutes with a logged warning on
+#     timeout instead of hanging.
+#   - The final reboot's `shutdown /r /f /t 30` is fire-and-forget and used to run inside the same
+#     try block whose finally then copies the transcript log to the thumbdrive - so the 30-second
+#     forced-shutdown countdown ran concurrently with that copy, and /f could kill this process
+#     mid-copy on a long run or slow removable media. This is the identical race already reasoned
+#     through for PST backups (2.39), which deliberately run before the countdown starts - the
+#     transcript just never got the same treatment. Fixed by moving the actual SHUTDOWN.EXE call
+#     to after the try/finally block, gated on a $script:shouldReboot flag set inside try, so it
+#     only fires once transcript relocation has actually finished.
+#   - Remove-TeamsProfile's meeting-recording cleanup and Clear-MiscAppData's Game Bar capture
+#     cleanup both still hardcoded the classic "<profile>\Videos" path, never migrated to
+#     Resolve-UserShellFolder despite Videos being one of the six folders Version 2.32 established
+#     can be independently redirected by classic GPO Folder Redirection - on a redirected machine,
+#     recorded Teams meetings and Win+G screen captures survived the "wipe" while the step reported
+#     success. Both now resolve the real per-user Videos location the same way
+#     Remove-UserPersonalFiles already does.
+#   - Cosmetic: Move-ArtifactOffMachine's Copy-Item, when relocating a directory (the -BackupPst
+#     case) into the already-created $destRoot, was copying the source directory itself as a
+#     subfolder rather than its contents - producing an extra "PstBackup_<machine>_<timestamp>\
+#     PstBackup\*.pst" nesting level instead of landing the files directly under the timestamped
+#     folder. Fixed by copying "$SourcePath\*" for directory sources (with an empty-directory
+#     guard, since that wildcard resolves to nothing and Copy-Item would otherwise throw).
+#   - Cosmetic: Clear-PinnedItems only released the outer Shell.Application COM object; the
+#     per-iteration Namespace folder object and each enumerated FolderItem were never explicitly
+#     released, a minor non-fatal RCW leak scoped to that one step's up-to-50 loop iterations. Both
+#     are now released via Marshal.ReleaseComObject as they go out of scope.
+# Date: 06-Sep-2026 Version 2.44 - Third independent audit pass, targeting the ~30 individual
+#   cleanup functions and GUI/Main-flow areas the first two passes hadn't examined closely. Found
+#   and fixed four real issues:
+#   - Clear-UserCertificates ran `Get-ChildItem Cert:\CurrentUser\My | Remove-Item -DeleteKey`
+#     "for the current session" before the per-hive registry/file cleanup that covers every real
+#     profile - but CurrentUser inside this elevated session is the TECHNICIAN's own profile (or
+#     whatever admin account is running the script), never the departing employee's. Unlike this
+#     script's other current-session-only conveniences (OneDrive.exe /reset, Get-SmbMapping, etc.),
+#     which are merely inconvenient if scoped wrong, this one ran with -DeleteKey - meaning every
+#     run of this step permanently deleted the OPERATOR's own Personal certificate store entries
+#     and any software-backed private keys, a real cost in a PIV/CAC-standard federal environment,
+#     for zero benefit toward wiping the actual target profiles. Removed that block entirely; the
+#     per-hive cleanup below it was never affected and still does the real work fleet-wide.
+#   - Remove-OutlookProfile's -BackupPst naming used Get-ProfileNameFromPath on the found PST's own
+#     FullName to derive the backup filename prefix, which assumes the path starts with $UsersBase
+#     and silently returns the whole path unchanged when it doesn't - a real possibility here, since
+#     Resolve-UserShellFolder (used to find these PSTs in the first place) can legitimately resolve
+#     Documents/Desktop/Downloads to a UNC share or another drive via classic GPO Folder
+#     Redirection. That produced an unusable destination filename, Copy-Item threw, and the PST was
+#     silently left un-backed-up AND un-deleted - not data loss, but a wipe goal quietly defeated for
+#     any redirected profile. Fixed by recording which resolved search root belongs to which user
+#     ($pstPathOwners) at resolution time, and looking up the owner by matching the found PST's path
+#     against those known roots instead of re-deriving it from the path afterward.
+#   - Invoke-RecycleBinCleanup, Clear-UsnJournal, and Invoke-SecureFreeSpaceWipe (-SecureWipe) all
+#     iterated every FileSystem PSDrive with no awareness that $script:RunningFromRemovableMedia
+#     already exists specifically because this script runs FROM a thumbdrive against many laptops -
+#     meaning the technician's own reusable USB drive got swept in as an ordinary target drive on
+#     every single run. Most costly for -SecureWipe's cipher /w pass (30-60+ minutes per drive per
+#     its own doc) - pointless against an IT tool with nothing needing forensic protection, and
+#     compounding across every machine in a stack. Added a shared Get-TargetFileSystemDrives helper
+#     that excludes the drive backing $PSScriptRoot when running from removable media, used by all
+#     three.
+#   - Clear-FireFox filtered profile folders with `-match '\.default|\.dev-edition-default'`, which
+#     only matches Firefox's auto-created default profile(s) - any additional profile a user created
+#     via about:profiles, or one with a custom/provisioned name, never matched and was left
+#     completely untouched (cache, history, and saved logins included) while the step still reported
+#     "COMPLETE". Since $ProfileBases already scopes to exactly the Profiles folder, every child
+#     directory there is a genuine profile - removed the name filter entirely rather than trying to
+#     maintain a naming-convention allowlist.
+# Date: 06-Sep-2026 Version 2.45 - Fourth pass: a genuine line-by-line close read of the entire
+#   file (not a targeted issue hunt this time), split across four overlapping ranges. One finding
+#   from that pass turned out to be WRONG on direct empirical test - a reviewer flagged
+#   Clear-KeePassData's Invoke-ForEachUserHive scriptblock (only declares -Sid, not -ProfilePath)
+#   as a parameter-binding error, contradicting the Version 2.41 changelog's own claim (also
+#   "confirmed by direct testing") that this binds fine. Re-tested directly rather than trusting
+#   either claim: `& { param([string]$Sid) ... } -Sid 'x' -ProfilePath 'y'` does NOT throw - an
+#   unmatched named argument to a plain (non-advanced) scriptblock is silently ignored. 2.41 was
+#   right; this pass's finding was discarded rather than "fixed", since there was nothing to fix.
+#   Five real issues DID survive verification and are fixed:
+#   - The most significant: Shadow Copies/USN Journal/Secure Free-Space Wipe were appended to the
+#     same ordered $script:AllTasks that the main task loop iterates, so they ran as the tail of
+#     that SAME loop - which finishes entirely before the separate, unconditional 'Relocate PST
+#     Backups' step that follows it. That's the reverse of both this file's own stated intent (the
+#     comment above these entries, and Clear-ShadowCopies's own .DESCRIPTION, both assert they run
+#     "after PST relocation") and of what -SecureWipe is FOR: with -BackupPst -SecureWipe both set,
+#     cipher /w's free-space overwrite completed before the local PST backup copy was deleted, so
+#     the blocks it freed were never covered by the wipe and stayed undelete-recoverable - directly
+#     defeating -SecureWipe's purpose for arguably the single most sensitive artifact this script
+#     produces. Fixed by recording those three task names in $script:TrailingTasks and explicitly
+#     deferring them to a second loop that runs after 'Relocate PST Backups', not as part of the
+#     first.
+#   - Invoke-ForEachUserHive fell through silently, with NO warning at all, when a profile folder
+#     exists but has no NTUSER.DAT (a corrupted/incompletely-provisioned profile) and isn't already
+#     mounted - it would invoke $Action against a HKU\<sid> hive that was never loaded, so every
+#     registry read/write in the caller just quietly found nothing via its own
+#     -ErrorAction SilentlyContinue. This directly contradicted the function's own .DESCRIPTION
+#     ("skips WITH A WARNING any profile whose hive fails to load"). Added the missing warning-and-
+#     return branch, matching the existing pattern for a failed `reg load`.
+#   - Clear-EventLogs filtered logs via an unguarded `Where-Object { $_.RecordCount -gt 0 }` - some
+#     disabled Analytic/Debug channels are documented to throw the moment RecordCount is accessed,
+#     even past Get-WinEvent's own -ErrorAction SilentlyContinue, which (the same pipeline-abort
+#     class of bug already fixed once in Invoke-ForEachUserHive) could silently leave every log
+#     after the throwing one uncleared. Moved the RecordCount check into a per-item try/catch
+#     inside the ForEach-Object instead of a preceding Where-Object.
+#   - Two cosmetic doc-comment fixes: Clear-PinnedItems had a duplicated "The The" from a prior
+#     edit, and separately was missing Marshal.ReleaseComObject on the FolderItems collection
+#     object itself (only the Namespace and each individual FolderItem were released) - now
+#     captured in its own variable and released. Clear-AmcacheAndShimCache's .DESCRIPTION had the
+#     registry path backwards ("Session Manager\Control" vs. the code's correct
+#     "Control\Session Manager"). Move-ArtifactOffMachine logged "Copied ... to thumbdrive" even
+#     when the source directory was empty and nothing was actually copied - now logs accurately for
+#     that case. The self-elevation trailing-backslash rejection's error text said "a single
+#     trailing backslash" even though the check (and the underlying corruption) fires for any odd
+#     count - reworded.
+#   Two more candidates were considered and deliberately NOT changed: $pstPathOwners could
+#   theoretically collide if two different users' GPO-redirected folders resolved to the exact same
+#   path (extremely unlikely on this fleet, and the existing behavior - last-write-wins on the
+#   owner mapping - is a reasonable fallback, not a crash); and Resolve-UserShellFolder only
+#   special-cases the %USERPROFILE% token before expanding, so a different per-user token (e.g.
+#   %HOMESHARE%) would in theory hit the same class of bug already fixed for %USERPROFILE% - no
+#   evidence this fleet's GPOs ever use such a token, so this is noted rather than spent effort
+#   guarding against a token that's never actually been observed in this registry value.
 
 [CmdletBinding()]
 param(
@@ -632,7 +780,7 @@ Current user: $env:USERDOMAIN\$env:USERNAME
             # validate-rather-than-escape approach as the embedded-quote check
             # above.
             if ($val -is [string] -and $val -match '\\+$' -and ($Matches[0].Length % 2) -eq 1) {
-                Write-Error "-$key ends in a single trailing backslash, which escapes the closing quote when passed through to the elevated relaunch and corrupts the argument list. Remove the trailing backslash (or double it) and try again. Value: $val"
+                Write-Error "-$key ends in an odd number of trailing backslashes, which escapes the closing quote when passed through to the elevated relaunch and corrupts the argument list. Remove the trailing backslash (or double it) and try again. Value: $val"
                 exit 1
             }
             $argList += "-$key", "`"$val`""
@@ -720,6 +868,34 @@ function Test-OnRemovableMedia {
     catch { return $false }
 }
 $script:RunningFromRemovableMedia = Test-OnRemovableMedia -Path $PSScriptRoot
+# Drive letter this script itself is running from - used by the drive-iterating
+# cleanup steps below (Recycle Bin, USN Journal, secure free-space wipe) to skip
+# the technician's own reusable thumbdrive when $RunningFromRemovableMedia is
+# true, rather than treating it like one of the target machine's internal
+# drives. Most concretely matters for -SecureWipe's cipher /w pass, which is
+# genuinely expensive (30-60+ minutes per drive per its own doc) and pointless
+# to run against an IT tool that gets reused across every machine in a stack.
+$script:ScriptDriveLetter = (Get-Item $PSScriptRoot -ErrorAction SilentlyContinue).PSDrive.Name
+
+function Get-TargetFileSystemDrives {
+    <#
+    .SYNOPSIS
+        Returns the machine's FileSystem drives to run whole-drive cleanup
+        against, excluding the removable drive this script is itself running
+        from when applicable.
+    .DESCRIPTION
+        Wraps `Get-PSDrive -PSProvider FileSystem`, filtering out
+        $script:ScriptDriveLetter when $script:RunningFromRemovableMedia is
+        true - used by Recycle Bin cleanup, USN Journal reset, and the
+        -SecureWipe free-space overwrite, none of which should treat the
+        technician's own reusable thumbdrive as one of the target machine's
+        internal drives.
+    .OUTPUTS
+        System.Management.Automation.PSDriveInfo[]
+    #>
+    Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+        Where-Object { -not ($script:RunningFromRemovableMedia -and $_.Name -eq $script:ScriptDriveLetter) }
+}
 
 function Move-ArtifactOffMachine {
     <#
@@ -752,8 +928,25 @@ function Move-ArtifactOffMachine {
         try {
             $destRoot = Join-Path $PSScriptRoot "Collected\$DestFolderName"
             New-Item -Path $destRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
-            Copy-Item -Path $SourcePath -Destination $destRoot -Recurse -Force -ErrorAction Stop
-            Write-Host "  Copied $SourcePath to thumbdrive: $destRoot" -ForegroundColor Green
+            if ((Get-Item $SourcePath -ErrorAction Stop).PSIsContainer) {
+                # $destRoot already exists (created above), so copying the source
+                # directory itself into it would nest an extra "<destRoot>\
+                # <SourceDirName>\..." level instead of landing directly under
+                # $destRoot - copy its contents instead. Guard against an empty
+                # source directory, where the "\*" wildcard would otherwise match
+                # nothing and Copy-Item would throw "Cannot find path".
+                if (Get-ChildItem $SourcePath -Force -ErrorAction SilentlyContinue) {
+                    Copy-Item -Path "$SourcePath\*" -Destination $destRoot -Recurse -Force -ErrorAction Stop
+                    Write-Host "  Copied $SourcePath to thumbdrive: $destRoot" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  $SourcePath was empty - nothing to copy, removing it." -ForegroundColor Green
+                }
+            }
+            else {
+                Copy-Item -Path $SourcePath -Destination $destRoot -Force -ErrorAction Stop
+                Write-Host "  Copied $SourcePath to thumbdrive: $destRoot" -ForegroundColor Green
+            }
             $copyOk = $true
         }
         catch {
@@ -946,7 +1139,13 @@ function Invoke-ForEachUserHive {
         ever logged into the machine. Skips (with a warning) any profile whose hive
         fails to load, and forces a full garbage collection before unloading so
         lingering .NET registry handles don't cause "Access is denied" from
-        `reg unload`.
+        `reg unload`. A terminating exception thrown by $Action for one profile is
+        caught and logged rather than allowed to propagate - PowerShell aborts the
+        entire enumeration pipeline on an unhandled terminating error, which would
+        otherwise silently skip every remaining profile for that one task (e.g. a
+        registry key with unusual ACLs throwing on one profile would leave every
+        profile after it in enumeration order untouched, with no indication beyond
+        one logged error that coverage was incomplete).
     .PARAMETER Action
         Scriptblock invoked once per local user profile, receiving -Sid <string> (the
         user's SID, for building "Registry::HKU\$Sid\..." paths) and -ProfilePath
@@ -963,7 +1162,18 @@ function Invoke-ForEachUserHive {
             $ntuser        = Join-Path $path 'NTUSER.DAT'
             $alreadyLoaded = Test-Path "Registry::HKU\$sid"
             $loaded        = $false
-            if (-not $alreadyLoaded -and (Test-Path $ntuser)) {
+            if (-not $alreadyLoaded) {
+                if (-not (Test-Path $ntuser)) {
+                    # A profile folder with no NTUSER.DAT (corrupted/incompletely
+                    # provisioned profile) used to fall through silently here with
+                    # no warning at all, then invoke $Action against a HKU\<sid>
+                    # hive that was never mounted - every registry read/write in
+                    # the caller would just quietly find nothing via its own
+                    # -ErrorAction SilentlyContinue, with zero indication in the
+                    # log that this profile's registry cleanup never happened.
+                    Write-Warning "  No NTUSER.DAT found for $(Split-Path $path -Leaf) - skipping"
+                    return
+                }
                 reg load "HKU\$sid" $ntuser 2>$null | Out-Null
                 if ($LASTEXITCODE -ne 0) {
                     Write-Warning "  Could not load hive for $(Split-Path $path -Leaf) - skipping"
@@ -971,7 +1181,10 @@ function Invoke-ForEachUserHive {
                 }
                 $loaded = $true
             }
-            try { & $Action -Sid $sid -ProfilePath $path }
+            try {
+                try { & $Action -Sid $sid -ProfilePath $path }
+                catch { Write-Warning "  Action failed for $(Split-Path $path -Leaf) (HKU\$sid): $($_.Exception.Message)" }
+            }
             finally {
                 if ($loaded) {
                     [gc]::Collect()
@@ -1159,16 +1372,26 @@ Function Clear-FireFox {
         Clears Firefox cache, cookies, history, saved logins, and session data for
         all users.
     .DESCRIPTION
-        Stops firefox.exe, then walks every user's Firefox profile folder (cache
-        under AppData\Local, profile data under AppData\Roaming) matching the
-        default/dev-edition-default profile naming convention, and deletes a fixed
-        list of known cache/history/login/session files and folders within each
-        profile (places.sqlite for history+bookmarks, logins.json for saved
-        passwords, key4.db for the password encryption key, the 'storage' folder
-        for IndexedDB/Cache API (Service Worker)/modern LocalStorage, etc). No
+        Stops firefox.exe, then walks every directory directly under each user's
+        Firefox Profiles folder (cache under AppData\Local, profile data under
+        AppData\Roaming) - every such directory is a real profile regardless of
+        name, so none are filtered out by name - and deletes a fixed list of
+        known cache/history/login/session files and folders within each profile
+        (places.sqlite for history+bookmarks, logins.json for saved passwords,
+        key4.db for the password encryption key, the 'storage' folder for
+        IndexedDB/Cache API (Service Worker)/modern LocalStorage, etc). No
         official Microsoft cmdlet exists for third-party browser data; this
         follows Mozilla's own documented profile-folder layout.
     .NOTES
+        An earlier version filtered profile folders with
+        `-match '\.default|\.dev-edition-default'`, which only matches Firefox's
+        auto-created default profile(s) - any additional profile a user created
+        via about:profiles, or one with a custom/provisioned name, never matched
+        and was left completely untouched (cache, history, and saved logins
+        included) while this step still reported success. Since $ProfileBases
+        already scopes to exactly the Profiles folder, every child directory
+        there is a genuine profile - no name filter is needed at all.
+
         webappsstore.sqlite only covers Firefox's LEGACY localStorage format -
         current Firefox versions store localStorage in the newer LSNG (LocalStorage
         Next Generation) format under the 'storage' folder alongside IndexedDB and
@@ -1199,7 +1422,6 @@ Function Clear-FireFox {
 
     foreach ($base in $ProfileBases) {
         Get-ChildItem $base -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '\.default|\.dev-edition-default' } |
             ForEach-Object {
                 $profilePath = $_.FullName
                 foreach ($item in $Items) {
@@ -1612,9 +1834,21 @@ Function Clear-EventLogs {
     # or pass -PreserveSecurityLog to skip just that log.
     $cleared = 0
     $skipped = 0
+    # RecordCount is checked inside this ForEach-Object rather than via a
+    # preceding Where-Object filter - some log entries (certain disabled
+    # Analytic/Debug channels) are known to throw a terminating error the
+    # moment RecordCount is accessed, even with -ListLog's own
+    # -ErrorAction SilentlyContinue. PowerShell aborts an entire pipeline on
+    # one iteration's unhandled terminating exception (the same class of bug
+    # already found and fixed in Invoke-ForEachUserHive), so an unguarded
+    # Where-Object here could silently leave every log after the throwing one
+    # in enumeration order uncleared. Guarding it per-item keeps that failure
+    # scoped to just the one log.
     Get-WinEvent -ListLog * -ErrorAction SilentlyContinue |
-        Where-Object { $_.RecordCount -gt 0 } |
         ForEach-Object {
+            try { if ($_.RecordCount -le 0) { return } }
+            catch { $skipped++; return }
+
             if ($PreserveSecurityLog -and $_.LogName -eq 'Security') {
                 Write-Host "  Preserved: '$($_.LogName)' (per -PreserveSecurityLog)" -ForegroundColor DarkYellow
                 $skipped++
@@ -1680,8 +1914,17 @@ Function Remove-TeamsProfile {
             Write-Host "New Teams (v2) removed for: $(Get-ProfileNameFromPath $_.FullName)" -ForegroundColor Cyan
         }
 
-    # Meeting recordings saved locally - can be large and contain sensitive operational content
-    Remove-Item "$UsersBase\*\Videos\Microsoft Teams\*" -Recurse -Force -ErrorAction SilentlyContinue
+    # Meeting recordings saved locally - can be large and contain sensitive
+    # operational content. Resolved per-user via Resolve-UserShellFolder rather
+    # than assumed at the classic "<profile>\Videos" path - classic GPO Folder
+    # Redirection can relocate Videos independently of OneDrive KFM (same gap
+    # already fixed for Desktop/Documents/Pictures/Downloads/Videos/Music in
+    # Remove-UserPersonalFiles; this step had never been migrated to match).
+    Invoke-ForEachUserHive {
+        param([string]$Sid, [string]$ProfilePath)
+        $videos = Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName 'My Video' -ClassicName 'Videos'
+        Remove-Item (Join-Path $videos 'Microsoft Teams\*') -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
     Write-Host -ForegroundColor Yellow "Teams Profile Removal - COMPLETE`r`n"
 }
@@ -1727,19 +1970,37 @@ Function Remove-OutlookProfile {
     # redirects both (along with Pictures) out of the profile root, and a PST a
     # user deliberately archived into a KFM-redirected Documents folder would
     # otherwise never be found by a path search that assumes "<profile>\Documents".
+    # $pstPathOwners maps each resolved search root to the username it belongs
+    # to, recorded at resolution time - used below instead of
+    # Get-ProfileNameFromPath, which assumes a found file's path starts with
+    # $UsersBase. That assumption breaks for classic GPO Folder Redirection
+    # (a real possibility here, same as everywhere else this script resolves
+    # shell folders), which can point Documents/Desktop/Downloads at a UNC
+    # share or another drive entirely outside $UsersBase - Get-ProfileNameFromPath
+    # would then return the whole path unchanged, producing an unusable
+    # (and Copy-Item-breaking) backup filename and silently leaving that PST
+    # un-backed-up and un-deleted. Knowing the search root -> username mapping
+    # up front sidesteps needing to infer it from the file's path at all.
     $pstSearchPaths = New-Object System.Collections.Generic.List[string]
+    $pstPathOwners  = @{}
     Invoke-ForEachUserHive {
         param([string]$Sid, [string]$ProfilePath)
         Remove-Item "Registry::HKU\$Sid\Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles" `
             -Force -Recurse -ErrorAction SilentlyContinue
-        Write-Host "  Outlook profile registry cleared for: $(Split-Path $ProfilePath -Leaf)"
+        $userName = Split-Path $ProfilePath -Leaf
+        Write-Host "  Outlook profile registry cleared for: $userName"
 
-        $pstSearchPaths.Add((Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName 'Personal' -ClassicName 'Documents'))
-        $pstSearchPaths.Add((Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName 'Desktop'  -ClassicName 'Desktop'))
+        $documents = Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName 'Personal' -ClassicName 'Documents'
+        $desktop   = Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName 'Desktop'  -ClassicName 'Desktop'
         # Downloads isn't OneDrive KFM-eligible, but classic GPO Folder Redirection
         # can still redirect it independently - resolve it the same way rather than
         # assuming it's always classic.
-        $pstSearchPaths.Add((Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName '{374DE290-123F-4565-9164-39C4925E467B}' -ClassicName 'Downloads'))
+        $downloads = Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName '{374DE290-123F-4565-9164-39C4925E467B}' -ClassicName 'Downloads'
+
+        foreach ($p in @($documents, $desktop, $downloads)) {
+            $pstSearchPaths.Add($p)
+            $pstPathOwners[$p] = $userName
+        }
     }
 
     # OST files can be gigabytes of cached email/calendar/contacts - remove across all users
@@ -1771,7 +2032,15 @@ Function Remove-OutlookProfile {
         if (-not (Test-Path $PstBackupPath)) { New-Item -Path $PstBackupPath -ItemType Directory -Force | Out-Null }
         $failedBackups = New-Object System.Collections.Generic.List[string]
         foreach ($pst in $pstFiles) {
-            $userName = Get-ProfileNameFromPath $pst.FullName
+            # Find which resolved search root this PST was found under, and use
+            # its recorded owner - not Get-ProfileNameFromPath, which assumes
+            # the path starts with $UsersBase and silently fails that assumption
+            # for a GPO Folder Redirection target outside it (see comment above
+            # $pstPathOwners). Falls back to Get-ProfileNameFromPath only if no
+            # recorded root matches, which shouldn't happen since $pstFiles was
+            # itself found by searching exactly these roots.
+            $ownerRoot = $pstPathOwners.Keys | Where-Object { $pst.FullName.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+            $userName = if ($ownerRoot) { $pstPathOwners[$ownerRoot] } else { Get-ProfileNameFromPath $pst.FullName }
             $destName = "$userName-$($pst.Name)"
             $destPath = Join-Path $PstBackupPath $destName
             # $destName has no folder component, so the same user having two
@@ -1822,7 +2091,10 @@ Function Clear-PinnedItems {
         invoking the shell's 'unpinfromhome' verb in a loop (re-enumerating after
         each removal since the COM collection goes stale, with a 300ms settle
         delay to avoid re-seeing a just-removed item, capped at 50 iterations). The
-        COM object is released in a finally block to avoid handle leaks.
+        outer Shell.Application COM object, the per-iteration Namespace folder
+        object and its Items() collection, and each enumerated FolderItem are all
+        released via Marshal.ReleaseComObject to avoid leaking RCWs across the
+        up-to-50 loop iterations this can run.
     .NOTES
         Uses the shell's canonical verb ID ('unpinfromhome') rather than matching
         the display text "Remove from Quick access" - matching display text only
@@ -1854,21 +2126,34 @@ Function Clear-PinnedItems {
         while ($found -and $iteration -lt $maxIterations) {
             $iteration++
             $found = $false
-            foreach ($item in $shell.Namespace("shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}").Items()) {
-                if (-not $item.IsFolder) { continue }
-                # 'unpinfromhome' is the shell's canonical, locale-independent
-                # verb for this action - matching the display text "Remove
-                # from Quick access" only works on English Windows and
-                # silently no-ops (nothing ever gets unpinned, no error) on
-                # any other display language.
-                try {
-                    $item.InvokeVerb('unpinfromhome')
-                    Start-Sleep -Milliseconds 300
-                    $found = $true
-                    break
-                } catch {
-                    continue
+            $ns = $shell.Namespace("shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}")
+            try {
+                $folderItems = $ns.Items()
+                foreach ($item in $folderItems) {
+                    if (-not $item.IsFolder) {
+                        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($item) | Out-Null
+                        continue
+                    }
+                    # 'unpinfromhome' is the shell's canonical, locale-independent
+                    # verb for this action - matching the display text "Remove
+                    # from Quick access" only works on English Windows and
+                    # silently no-ops (nothing ever gets unpinned, no error) on
+                    # any other display language.
+                    try {
+                        $item.InvokeVerb('unpinfromhome')
+                        Start-Sleep -Milliseconds 300
+                        $found = $true
+                        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($item) | Out-Null
+                        break
+                    } catch {
+                        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($item) | Out-Null
+                        continue
+                    }
                 }
+            }
+            finally {
+                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($folderItems) | Out-Null
+                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($ns) | Out-Null
             }
         }
     }
@@ -2031,12 +2316,12 @@ Function Invoke-RecycleBinCleanup {
     # present for some reason (e.g. an unusually stripped-down PowerShell
     # install).
     if (Get-Command Microsoft.PowerShell.Management\Clear-RecycleBin -ErrorAction SilentlyContinue) {
-        Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-TargetFileSystemDrives | ForEach-Object {
             Microsoft.PowerShell.Management\Clear-RecycleBin -DriveLetter $_.Name -Force -ErrorAction SilentlyContinue
         }
     }
     else {
-        Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-TargetFileSystemDrives | ForEach-Object {
             Remove-Item "$($_.Root)`$Recycle.Bin\*" -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
@@ -2400,12 +2685,7 @@ Function Clear-UserCertificates {
         Clears each user's personal ("My") certificate store, including private
         keys.
     .DESCRIPTION
-        Clears Cert:\CurrentUser\My via the PowerShell Certificate provider
-        (Remove-Item -DeleteKey, so the private key is removed along with the
-        store entry, not just the store index) as the preferred method for the
-        current session - same current-session-only caveat as OneDrive.exe
-        /reset, since the Cert: drive only ever maps CurrentUser/LocalMachine and
-        can't be pointed at another user's mounted HKU\<SID> hive. Then, for every
+        For every
         user, removes the SystemCertificates\My\Certificates registry key
         directly, plus the orphaned private-key files under each profile's
         Crypto\RSA and Crypto\Keys folders (the registry entries are just the
@@ -2415,39 +2695,21 @@ Function Clear-UserCertificates {
         are left alone since those are typically trusted-authority certs the
         system needs, not anything tied to the specific user.
     .NOTES
-        Official mechanism used: the Cert: PowerShell provider, Remove-Item
-        -DeleteKey (current session only). -DeleteKey only needs delegated
-        credentials for a REMOTE computer's store per Microsoft's own docs, and
-        this always runs locally, so it's safe to use unconditionally. -Force is
-        accepted but silently ignored on this provider - Path/DeleteKey/
-        WhatIf/Confirm are the only parameters Remove-Item actually supports on
-        the Cert: drive.
+        Deliberately does NOT use the Cert:\CurrentUser\My provider path that an
+        earlier version of this function ran "for the current session" (the same
+        pattern used elsewhere in this script for OneDrive.exe /reset, Get-SmbMapping,
+        etc.) - CurrentUser inside this elevated session is the TECHNICIAN's own
+        profile (or whatever admin account is running the script), never the
+        departing employee's, and unlike those other current-session conveniences
+        this one was run with -DeleteKey. In a PIV/CAC-standard environment that
+        meant every run of this step permanently deleted the operator's own Personal
+        certificate store entries and any software-backed private keys - a real cost
+        to the technician, not just an inconvenience, for zero benefit toward wiping
+        the actual target profiles. The per-hive registry/file cleanup below is what
+        actually reaches every real profile on the machine and was never affected by
+        this.
     #>
     Write-Host "Clearing per-user certificate store (all users)..."
-
-    # Personal ("My") store only - this is where client/auth certs with
-    # private keys live. Root/CA/trust stores are left alone since those are
-    # typically trusted-authority certs the system needs, not anything tied
-    # to the specific user.
-    #
-    # Cert:\CurrentUser\My is PowerShell's official Certificate provider -
-    # Remove-Item against it is the supported way to delete a certificate
-    # (and its key-container link), rather than deleting the registry index
-    # entry directly. Same limitation as OneDrive.exe /reset above though:
-    # the Cert: drive only ever maps CurrentUser/LocalMachine, so this only
-    # reaches whichever user is running THIS session - it can't be pointed
-    # at another user's mounted HKU\<SID> hive. Run it first as the
-    # preferred method for this session; the registry/file cleanup below is
-    # what actually covers every other profile on the machine.
-    # -DeleteKey is the Certificate provider's own dynamic parameter for
-    # also removing the private key, not just the store entry - safe to use
-    # unconditionally here since it only needs delegated credentials for a
-    # REMOTE computer's CurrentUser store (per Microsoft's own docs), and
-    # this always runs locally. (-Force is accepted but silently ignored on
-    # this provider - Path/DeleteKey/WhatIf/Confirm are the only parameters
-    # Remove-Item actually supports on the Cert: drive.)
-    Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
-        Remove-Item -DeleteKey -ErrorAction SilentlyContinue
 
     Invoke-ForEachUserHive {
         param([string]$Sid, [string]$ProfilePath)
@@ -2603,41 +2865,16 @@ Function Clear-MiscAppData {
 
     # Xbox Game Bar (Win+G) screen/window recordings - can capture meeting or
     # work content, same sensitivity tier as Teams meeting recordings above.
-    Remove-Item "$UsersBase\*\Videos\Captures\*" -Recurse -Force -ErrorAction SilentlyContinue
+    # Resolved per-user via Resolve-UserShellFolder rather than assumed at the
+    # classic "<profile>\Videos" path - same GPO Folder Redirection gap already
+    # fixed for Remove-TeamsProfile's meeting-recording cleanup.
+    Invoke-ForEachUserHive {
+        param([string]$Sid, [string]$ProfilePath)
+        $videos = Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName 'My Video' -ClassicName 'Videos'
+        Remove-Item (Join-Path $videos 'Captures\*') -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
     Write-Host -ForegroundColor Yellow "Misc App Data Cleanup - COMPLETE`r`n"
-}
-
-Function Reset-Personalization {
-    <#
-    .SYNOPSIS
-        Resets Start Menu/Taskbar layout for all users, without touching wallpaper
-        or theme.
-    .DESCRIPTION
-        For every user, deletes the Start Menu layout cache
-        (LayoutModification.xml), the Start Menu Experience Host's package state,
-        and the legacy taskbar pinned-items folder - Windows regenerates both
-        Start Menu and taskbar layout from defaults once these are gone.
-        Deliberately does NOT touch wallpaper or theme (Control Panel\Desktop
-        Wallpaper, Themes\CurrentTheme) - the desktop background is left exactly
-        as each user has it set, matching Remove-UserPersonalFiles, which
-        specifically preserves the current wallpaper picture file too rather than
-        treating it as just another file to wipe.
-    #>
-    Write-Host "Resetting Start Menu/Taskbar layout (all users)..."
-    # Deliberately does NOT touch wallpaper/theme (Control Panel\Desktop
-    # Wallpaper, Themes\CurrentTheme) - the desktop background is left
-    # exactly as each user has it set, matching Remove-UserPersonalFiles
-    # below, which specifically preserves the current wallpaper picture file
-    # too rather than treating it as just another file to wipe.
-
-    # Start Menu pinned tiles/layout cache and taskbar pinned items - Windows
-    # regenerates both from defaults once these are gone.
-    Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Windows\Shell\LayoutModification.xml" -Force -ErrorAction SilentlyContinue
-    Remove-Item "$UsersBase\*\AppData\Local\Packages\Microsoft.Windows.StartMenuExperienceHost_*\LocalState\*" -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item "$UsersBase\*\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\*" -Recurse -Force -ErrorAction SilentlyContinue
-
-    Write-Host -ForegroundColor Yellow "Personalization Reset - COMPLETE`r`n"
 }
 
 Function Remove-UserPersonalFiles {
@@ -2645,10 +2882,18 @@ Function Remove-UserPersonalFiles {
     .SYNOPSIS
         Deletes the actual contents of Desktop/Documents/Downloads/Pictures/
         Videos/Music for every user, preserving each user's current desktop
-        background picture.
+        background picture and any Desktop shortcuts (.lnk/.url).
     .DESCRIPTION
         Unlike every other function in this script, this deletes real user files,
         not cache/app data, and runs unconditionally (there is no opt-out switch).
+        On the Desktop folder specifically, .lnk and .url files are skipped -
+        shortcuts to installed applications/network locations are pointers, not
+        personal data, and a previous version of this function was deleting them
+        along with everything else, which broke application/network shortcuts on
+        the Desktop for the next user (confirmed as the actual cause after a user
+        report of "broken shortcuts" post-run). This exclusion is Desktop-only -
+        Documents/Pictures/Downloads/Videos/Music are still wiped in full, since a
+        stray .lnk in one of those isn't the taskbar/desktop launcher surface.
         For each user (while their hive is mounted via Invoke-ForEachUserHive),
         FIRST reads the current Wallpaper registry value, copies that file's
         content to a temporary stash location, and resolves the REAL current
@@ -2684,6 +2929,7 @@ Function Remove-UserPersonalFiles {
     #>
     Write-Host "Wiping personal files (Desktop/Documents/Downloads/Pictures/Videos/Music) for all users..." -ForegroundColor Red
     Write-Host "  Each user's current desktop background picture is preserved, even if it lives in one of these folders." -ForegroundColor Yellow
+    Write-Host "  Desktop shortcuts (.lnk/.url) are preserved; everything else on the Desktop is wiped." -ForegroundColor Yellow
     Write-Host "  Desktop/Documents/Pictures are resolved to their real current location, honoring OneDrive Known Folder Move." -ForegroundColor Yellow
 
     # Wallpaper (path AND a stashed copy of its actual content) and the real
@@ -2743,16 +2989,30 @@ Function Remove-UserPersonalFiles {
             # mounted, fall back to the classic path for all six rather than
             # skipping the profile entirely.
             if ($data) {
-                $targets = @($data.Desktop, $data.Documents, $data.Pictures, $data.Downloads, $data.Videos, $data.Music)
+                $targets = @(
+                    [pscustomobject]@{ Name = 'Desktop';   Path = $data.Desktop }
+                    [pscustomobject]@{ Name = 'Documents'; Path = $data.Documents }
+                    [pscustomobject]@{ Name = 'Pictures';  Path = $data.Pictures }
+                    [pscustomobject]@{ Name = 'Downloads'; Path = $data.Downloads }
+                    [pscustomobject]@{ Name = 'Videos';    Path = $data.Videos }
+                    [pscustomobject]@{ Name = 'Music';     Path = $data.Music }
+                )
             }
             else {
-                $targets = 'Desktop', 'Documents', 'Pictures', 'Downloads', 'Videos', 'Music' | ForEach-Object { Join-Path $profileDir $_ }
+                $targets = 'Desktop', 'Documents', 'Pictures', 'Downloads', 'Videos', 'Music' |
+                    ForEach-Object { [pscustomobject]@{ Name = $_; Path = (Join-Path $profileDir $_) } }
             }
 
+            # On the Desktop specifically, .lnk/.url shortcuts are skipped -
+            # see the function's .DESCRIPTION for why (this was previously
+            # wiping application/network shortcuts along with real files).
             foreach ($target in $targets) {
-                if (Test-Path $target) {
-                    Get-ChildItem $target -Force -ErrorAction SilentlyContinue |
-                        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path $target.Path) {
+                    $items = Get-ChildItem $target.Path -Force -ErrorAction SilentlyContinue
+                    if ($target.Name -eq 'Desktop') {
+                        $items = $items | Where-Object { $_.Extension -notin '.lnk', '.url' }
+                    }
+                    $items | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
                 }
             }
 
@@ -2832,7 +3092,19 @@ Function Invoke-CleanMgrAutomation {
         Write-Warning "CleanMgr.exe exited with code $($cleanProc.ExitCode)"
     }
     Write-Host 'Waiting for CleanMgr and DismHost to finish...'
-    Get-Process -Name cleanmgr, dismhost -ErrorAction SilentlyContinue | Wait-Process
+    # DismHost (CleanMgr's WinSxS/Windows.old helper) is known to occasionally wedge on
+    # real machines. Unlike every other process-wait in this script (Stop-ProcessAndWait
+    # caps at 15s for exactly this reason), this used to have no timeout at all, which
+    # could stall every remaining step - and the final reboot - forever. Bounded to 10
+    # minutes; a genuine timeout is logged and the run continues rather than hanging.
+    $cleanupProcs = Get-Process -Name cleanmgr, dismhost -ErrorAction SilentlyContinue
+    if ($cleanupProcs) {
+        $cleanupProcs | Wait-Process -Timeout 600 -ErrorAction SilentlyContinue
+        $stillRunning = $cleanupProcs | Where-Object { -not $_.HasExited }
+        if ($stillRunning) {
+            Write-Warning "CleanMgr/DismHost still running after 10 minutes - continuing without waiting further ($(($stillRunning | ForEach-Object { $_.ProcessName }) -join ', '))."
+        }
+    }
 
     # Remove the flags we set so interactive CleanMgr runs start with a clean slate
     Get-ItemProperty -Path "$volCacheBase\*" -Name StateFlags0001 -ErrorAction SilentlyContinue |
@@ -2927,7 +3199,7 @@ Function Clear-UsnJournal {
     # things that no longer exist can still surface here. Windows rebuilds
     # the journal automatically as soon as anything writes to the volume
     # again, so this is a no-risk reset, not a permanent disable.
-    Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-TargetFileSystemDrives | ForEach-Object {
         fsutil usn deletejournal /D $_.Root.TrimEnd('\') 2>$null | Out-Null
     }
     Write-Host -ForegroundColor Yellow "USN Journal Reset - COMPLETE`r`n"
@@ -2939,7 +3211,7 @@ Function Clear-AmcacheAndShimCache {
         Clears Amcache.hve and the AppCompatCache (ShimCache) registry value.
     .DESCRIPTION
         Deletes Amcache.hve under System32\AppCompat\Programs and removes the
-        AppCompatCache value under Session Manager\Control. Both record the full
+        AppCompatCache value under Control\Session Manager. Both record the full
         path, hash, and first-run timestamp of every .exe ever run on this
         machine - richer and more persistent application-execution history than
         Prefetch (already cleared by Clear-WindowsHistory). Amcache.hve may still
@@ -3055,7 +3327,7 @@ Function Invoke-SecureFreeSpaceWipe {
     # undelete tools until the space is reused. cipher /w is Windows' own
     # built-in 3-pass free-space overwrite, and is what actually makes all
     # of the preceding cleanup stick instead of just being hidden.
-    Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-TargetFileSystemDrives | ForEach-Object {
         $drive = $_.Root.TrimEnd('\')
         Write-Host "  Wiping free space on $drive ..."
         cipher /w:$drive | Out-Null
@@ -3367,7 +3639,6 @@ $script:AllTasks = [ordered]@{
     'Clear Meeting App Caches'   = { Clear-MeetingAppCaches }                # Zoom/WebEx local cache
     'Clear Misc App Data'        = { Clear-MiscAppData }                     # Phone Link, Mail/Calendar, OneNote, Skype
     'Remove Scheduled Tasks'     = { Remove-NonMicrosoftScheduledTasks }     # Tasks outside \Microsoft\ task-path
-    'Reset Personalization'      = { Reset-Personalization }                 # Start Menu/Taskbar layout (not wallpaper)
     'Clear Event Logs'           = { Clear-EventLogs }                       # Every non-empty event log, classic + modern
     'Remove Teams Profile'       = { Remove-TeamsProfile }                   # Teams v1+v2 data, all users
     'Remove Outlook Profile'     = { Remove-OutlookProfile }                 # Outlook profile registry, OST/NK2, PST (+backup)
@@ -3390,16 +3661,24 @@ $script:AllTasks = [ordered]@{
     'Clear KeePass Config'       = { Clear-KeePassData }                     # Recent-database list, app config
 }
 
-# Shadow copies/USN journal/free-space wipe run last, deliberately after
-# every other task (including PST relocation just above, which itself
-# deletes the local backup copy once it's safely off the machine) - so
-# nothing gets deleted afterward that a shadow copy could still contain or
-# that free space wipe wouldn't cover.
+# Shadow copies/USN journal/free-space wipe are meant to run last, deliberately
+# after every other task INCLUDING PST relocation (which itself deletes the
+# local backup copy once it's safely off the machine) - so nothing gets deleted
+# afterward that a shadow copy could still contain, or that the free-space wipe
+# wouldn't cover. Being appended here to the same ordered $script:AllTasks that
+# the GUI checklist is built from only guarantees they run last AMONG the main
+# task loop - 'Relocate PST Backups' is invoked separately, in its own
+# Invoke-Step call after that loop finishes (see Main, below), so appending
+# them here does NOT by itself make them run after PST relocation too. Their
+# names are recorded in $script:TrailingTasks so Main can explicitly defer
+# running them until after PST relocation has already happened - see the
+# comment there for why this split exists.
 $script:AllTasks['Clear Shadow Copies'] = { Clear-ShadowCopies }
 $script:AllTasks['Reset USN Journal']   = { Clear-UsnJournal }
 if ($SecureWipe) {
     $script:AllTasks['Secure Free-Space Wipe'] = { Invoke-SecureFreeSpaceWipe }
 }
+$script:TrailingTasks = @('Clear Shadow Copies', 'Reset USN Journal', 'Secure Free-Space Wipe')
 
 # Call: Show-TaskSelectionDialog. See its three-way $null / empty-array /
 # populated-array return contract documented in its own .OUTPUTS help above -
@@ -3446,8 +3725,11 @@ $startTime = Get-Date
 # timestamped header and, on failure, $script:stepErrors) and its scriptblock
 # (normally a single function call, e.g. { Clear-Chrome }).
 try {
+    # $script:TrailingTasks (Shadow Copies/USN Journal/Secure Free-Space Wipe)
+    # are skipped in this first pass and run afterward instead - see below.
     foreach ($taskName in $script:AllTasks.Keys) {
         if ($taskName -notin $selectedTasks) { continue }
+        if ($taskName -in $script:TrailingTasks) { continue }
         Invoke-Step $taskName $script:AllTasks[$taskName]
     }
 
@@ -3460,14 +3742,33 @@ try {
     # on the machine being handed to a new user - worse than the default
     # (no -BackupPst) behavior of just deleting them outright, and the same
     # class of bug as the OneDrive-checkbox-independence issue fixed in
-    # Version 2.31. Runs here (after every selected task, before the reboot
-    # trigger below, not inside the transcript-closing finally block) because
-    # a PST backup can be multiple GB - it needs the full run rather than
-    # racing the 30-second reboot countdown or a closed transcript handle.
+    # Version 2.31. Runs here (after every selected non-trailing task, before
+    # the reboot trigger below, not inside the transcript-closing finally
+    # block) because a PST backup can be multiple GB - it needs the full run
+    # rather than racing the 30-second reboot countdown or a closed transcript
+    # handle.
+    #
+    # Deliberately runs BEFORE $script:TrailingTasks, not after: an earlier
+    # version ran Shadow Copies/USN Journal/Secure Free-Space Wipe as the tail
+    # of the same single loop this whole block used to be part of, which meant
+    # they actually executed BEFORE this point - the local PST backup copy
+    # (arguably the most sensitive artifact this script produces) got deleted
+    # by Move-ArtifactOffMachine AFTER the free-space wipe had already run,
+    # so the freed disk blocks were never covered by it and stayed
+    # undelete-recoverable, exactly contradicting -SecureWipe's whole purpose.
     if ($BackupPst) {
         Invoke-Step 'Relocate PST Backups' {
             Move-ArtifactOffMachine -SourcePath $PstBackupPath -DestFolderName "PstBackup_$($env:COMPUTERNAME)_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
         }
+    }
+
+    # Now run the deferred trailing tasks, in their original $script:AllTasks
+    # order, so they genuinely run last - after PST relocation has already
+    # deleted its local copy - rather than merely last among the main loop.
+    foreach ($taskName in $script:TrailingTasks) {
+        if ($taskName -notin $script:AllTasks.Keys) { continue }
+        if ($taskName -notin $selectedTasks) { continue }
+        Invoke-Step $taskName $script:AllTasks[$taskName]
     }
 
     $elapsed = (Get-Date) - $startTime
@@ -3488,12 +3789,8 @@ try {
         Write-Host "Reboot suppressed (-SkipReboot). Reboot manually when ready." -ForegroundColor Yellow
     }
     else {
-        Write-Host "Process complete. Computer will reboot in 30 seconds."
-        Write-Host "Run 'shutdown /a' in a command prompt to cancel the reboot." -ForegroundColor Cyan
-        SHUTDOWN.EXE /r /f /t 30 /c 'Rebooting to complete Reset_Fire_Laptop cleanup....'
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Shutdown command failed with exit code $LASTEXITCODE"
-        }
+        Write-Host "Process complete. Reboot will be scheduled once the log is relocated."
+        $script:shouldReboot = $true
     }
 }
 finally {
@@ -3501,4 +3798,23 @@ finally {
     # Must run after Stop-Transcript releases the log file handle -
     # otherwise the copy/delete below would fail while it's still open.
     Move-ArtifactOffMachine -SourcePath $LogPath -DestFolderName 'Logs'
+}
+
+# The actual reboot trigger is deliberately OUTSIDE the try/finally above,
+# scheduled only after transcript relocation has already finished - not
+# alongside it. `shutdown /r /f /t 30` is fire-and-forget: it schedules a
+# forced reboot 30 seconds out and returns immediately, so the countdown used
+# to run concurrently with the finally block's transcript copy to the
+# thumbdrive. `/f` force-closes this very PowerShell process once the
+# deadline hits, which could kill it mid-copy on a long/verbose run or slow
+# removable media - the identical race already reasoned through for PST
+# backups (see the 'Relocate PST Backups' comment above), which is why that
+# copy runs before this point too.
+if ($script:shouldReboot) {
+    Write-Host "Computer will reboot in 30 seconds."
+    Write-Host "Run 'shutdown /a' in a command prompt to cancel the reboot." -ForegroundColor Cyan
+    SHUTDOWN.EXE /r /f /t 30 /c 'Rebooting to complete Reset_Fire_Laptop cleanup....'
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Shutdown command failed with exit code $LASTEXITCODE"
+    }
 }
