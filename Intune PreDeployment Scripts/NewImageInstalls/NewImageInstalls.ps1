@@ -1,9 +1,4 @@
 ﻿#Requires -RunAsAdministrator
-param (
-    [string]$Architecture = "x64",
-    [string]$Platform     = "Windows",
-    [string]$Channel      = "Stable"
-)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -34,69 +29,37 @@ function Test-DownloadedInstallerSignature {
     }
 }
 
+# Chrome and Edge both used to reimplement their own download+install logic
+# here, duplicating (and drifting from) installChrome.ps1/Edge.ps1 elsewhere
+# in the repo - both now just call the consolidated
+# ..\Browsers\Install-Browsers.ps1, which those two were themselves replaced
+# by (see Browser Install Archive\README.md).
+function Invoke-BrowserInstaller {
+    param([Parameter(Mandatory)][ValidateSet('Chrome', 'Edge')][string]$Browser)
+    $installerPath = Join-Path $PSScriptRoot '..\Browsers\Install-Browsers.ps1'
+    if (-not (Test-Path $installerPath)) {
+        Write-Output "Browser installer script not found: $installerPath"
+        return $false
+    }
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installerPath -Browser $Browser
+    switch ($LASTEXITCODE) {
+        0       { return $true }
+        3010    { $script:AnyRebootNeeded = $true; return $true }
+        1641    { $script:AnyRebootNeeded = $true; return $true }
+        default { Write-Output "Browser installer exited with code $LASTEXITCODE"; return $false }
+    }
+}
+
 function Install-Chrome {
     Write-Output ""
     Write-Output "Installing Google Chrome..."
-    try {
-        $uri  = "https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi"
-        $path = "$PSScriptRoot\googlechromestandaloneenterprise64.msi"
-        Invoke-WebRequest -Uri $uri -OutFile $path -UseBasicParsing -ErrorAction Stop
-        Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Google LLC'
-        $proc = Start-Process msiexec.exe -ArgumentList "/i `"$path`" /qn /norestart" -Wait -PassThru
-        if ($proc.ExitCode -notin @(0, 3010, 1641)) {
-            throw "msiexec exited $($proc.ExitCode)"
-        }
-        if ($proc.ExitCode -in @(3010, 1641)) { $script:AnyRebootNeeded = $true }
-        Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
-        return $true
-    } catch {
-        Write-Output ""
-        Write-Output "Error installing Chrome: $_"
-        return $false
-    }
+    return Invoke-BrowserInstaller -Browser Chrome
 }
 
 function Install-Edge {
     Write-Output ""
     Write-Output "Installing Microsoft Edge..."
-
-    $apiUrl = "https://edgeupdates.microsoft.com/api/products?view=enterprise"
-
-    try {
-        $response = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -ErrorAction Stop
-    } catch {
-        Write-Error "Failed to retrieve Edge API JSON: $_"
-        return $false
-    }
-
-    $channelObj = $response | Where-Object { $_.Product -eq $Channel }
-    if (-not $channelObj) { Write-Error "Channel '$Channel' not found in API response."; return $false }
-
-    $filtered = $channelObj.Releases |
-        Where-Object { $_.Platform -eq $Platform -and $_.Architecture -eq $Architecture }
-    if (-not $filtered) { Write-Error "No releases found for $Platform/$Architecture."; return $false }
-
-    $latestRelease = $filtered | Sort-Object { [version]$_.ProductVersion } -Descending | Select-Object -First 1
-    if (-not $latestRelease) { Write-Error "Could not identify the latest Edge release."; return $false }
-
-    $artifact = $latestRelease.Artifacts | Where-Object { $_.Location -match "\.msi$" } | Select-Object -First 1
-    if (-not $artifact) { Write-Error "MSI artifact not found for latest Edge release."; return $false }
-
-    try {
-        $path = "$PSScriptRoot\MicrosoftEdgeEnterpriseX64.msi"
-        Invoke-WebRequest -Uri $artifact.Location -OutFile $path -UseBasicParsing -ErrorAction Stop
-        Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Microsoft Corporation'
-        $proc = Start-Process msiexec.exe -ArgumentList "/i `"$path`" /qn /norestart" -Wait -PassThru
-        if ($proc.ExitCode -notin @(0, 3010, 1641)) {
-            throw "msiexec exited $($proc.ExitCode)"
-        }
-        if ($proc.ExitCode -in @(3010, 1641)) { $script:AnyRebootNeeded = $true }
-        Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
-        return $true
-    } catch {
-        Write-Output "Error installing Edge: $_"
-        return $false
-    }
+    return Invoke-BrowserInstaller -Browser Edge
 }
 
 function Install-DotNet {

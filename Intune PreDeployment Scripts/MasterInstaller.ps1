@@ -38,9 +38,14 @@ Set-StrictMode -Version Latest
 # non-empty anyway. If a fallback target is ever changed to pull from an
 # external/downloaded source, put a real pinned hash here instead of
 # leaving it blank.
+# Chrome and Edge both fall back to the same consolidated Browsers\Install-
+# Browsers.ps1 now (replacing their old separate Chrome/installChrome.ps1 and
+# Edge/Edge.ps1, archived under 'Browser Install Archive') - FallbackArgs
+# tells Invoke-FallbackScript which -Browser to pass so it installs just the
+# one product instead of showing its interactive menu.
 $Products = @(
     @{ Name = 'Acrobat'; WingetId = 'Adobe.Acrobat.Pro';
-       Fallback = Join-Path $PSScriptRoot 'Acrobat/installAcrobat.ps1';
+       Fallback = Join-Path $PSScriptRoot 'Acrobat/installAcrobat.ps1'; FallbackArgs = @();
        # 'Adobe Acrobat DC*' (not a bare '*') is intentional: Acrobat/Standard
        # DC's real uninstall-registry DisplayName is "Adobe Acrobat DC"
        # (optionally with a trailing qualifier), while Reader DC's is
@@ -52,10 +57,10 @@ $Products = @(
        # carry that distinction.
        Sha256   = ''; DisplayNamePattern = 'Adobe Acrobat DC*' },
     @{ Name = 'Chrome' ; WingetId = 'Google.Chrome';
-       Fallback = Join-Path $PSScriptRoot 'Chrome/installChrome.ps1';
+       Fallback = Join-Path $PSScriptRoot 'Browsers/Install-Browsers.ps1'; FallbackArgs = @('-Browser', 'Chrome');
        Sha256   = ''; DisplayNamePattern = 'Google Chrome' },
     @{ Name = 'Edge'   ; WingetId = 'Microsoft.Edge';
-       Fallback = Join-Path $PSScriptRoot 'Edge/Edge.ps1';
+       Fallback = Join-Path $PSScriptRoot 'Browsers/Install-Browsers.ps1'; FallbackArgs = @('-Browser', 'Edge');
        # Deliberately an EXACT match, not a wildcard: "Microsoft Edge*" would
        # also match "Microsoft Edge WebView2 Runtime" and "Microsoft Edge
        # Update", both commonly present alongside real Edge, and
@@ -150,7 +155,7 @@ function Invoke-WingetInstall {
 }
 
 function Invoke-FallbackScript {
-    param([Parameter(Mandatory)][string] $Path, [string] $Sha256)
+    param([Parameter(Mandatory)][string] $Path, [string] $Sha256, [string[]] $ArgumentList = @())
     if (-not (Test-Path $Path)) {
         Write-Log -Level 'Error' -Message "Fallback script missing: $Path"
         throw "Script not found: $Path"
@@ -160,7 +165,7 @@ function Invoke-FallbackScript {
         throw "Hash validation failed for $Path"
     }
 
-    Write-Log -Level 'Information' -Message "Running fallback script: $Path"
+    Write-Log -Level 'Information' -Message "Running fallback script: $Path $($ArgumentList -join ' ')"
     $oldPol = Get-ExecutionPolicy -Scope Process
     try {
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
@@ -170,7 +175,7 @@ function Invoke-FallbackScript {
         # legitimately failed (e.g. installAcrobat.ps1 exiting 1) fell
         # straight through with no signal to the caller, which then always
         # treated it as a success.
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Path
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Path @ArgumentList
         if ($LASTEXITCODE -in 3010, 1641) { $script:AnyRebootNeeded = $true }
         return ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -in 3010, 1641)
     } finally {
@@ -302,7 +307,7 @@ try {
         }
         if (-not $success) {
             Write-Log -Level 'Warning' -Message "Winget unavailable or failed for $($product.Name); falling back"
-            $success = Invoke-FallbackScript -Path $product.Fallback -Sha256 $product.Sha256
+            $success = Invoke-FallbackScript -Path $product.Fallback -Sha256 $product.Sha256 -ArgumentList $product.FallbackArgs
         }
 
         if ($success) {

@@ -195,4 +195,122 @@ function Write-DeployLog {
     } catch { Write-Verbose "Failed to write to event log: $($_.Exception.Message)" }
 }
 
-Export-ModuleMember -Function New-SingleInstanceLock, Close-SingleInstanceLock, Get-AdaptiveBitsPriority, Invoke-VerifiedDownload, Write-DeployLog
+function Get-ChromeLatestInfo {
+    <#
+    .SYNOPSIS
+        Looks up the latest stable Chrome win64/arm64 MSI version, download URL,
+        and SHA-256 via Google's versionhistory API, caching the result in
+        $env:TEMP for -CacheHours.
+    .DESCRIPTION
+        Shared by Install-Browsers.ps1 (local install) and Push-Browsers.ps1
+        (remote PsExec push) so this lookup - and the version-feed response
+        shape - lives in exactly one place instead of being copy-pasted between
+        them.
+    #>
+    param([string]$Proxy, [int]$CacheHours = 4)
+
+    $isArm   = (Get-CimInstance Win32_Processor).Architecture -eq 12
+    $archKey = if ($isArm) { 'win64-arm64' } else { 'win64' }
+    $cache   = Join-Path $env:TEMP "browserdeploy-chrome-$archKey.json"
+    if ((Test-Path $cache) -and (Get-Item $cache).LastWriteTime -gt (Get-Date).AddHours(-$CacheHours)) {
+        return Get-Content $cache -Raw | ConvertFrom-Json
+    }
+    $api = "https://versionhistory.googleapis.com/v1/chrome/platforms/$archKey/channels/stable/versions?filter=endtime%3Dnone&num_versions=1"
+    $iwArgs = @{ Uri = $api; ErrorAction = 'Stop' }
+    if ($Proxy) { $iwArgs.Proxy = $Proxy }
+    $json = Invoke-RestMethod @iwArgs
+    $ver  = $json.versions | Select-Object -First 1
+    $file = $ver.files     | Where-Object { $_.name -like '*.msi' } | Select-Object -First 1
+    $fileName = if ($file.name) { $file.name } elseif ($isArm) { 'GoogleChromeStandaloneEnterpriseArm64.msi' } else { 'GoogleChromeStandaloneEnterprise64.msi' }
+    $parsedVersion = try { [version]$ver.version } catch { [version]'0.0.0.0' }
+    $info = [pscustomobject]@{
+        Version  = $parsedVersion
+        Sha256   = $file.sha256
+        FileName = $fileName
+        Url      = "https://dl.google.com/dl/chrome/install/$fileName"
+    }
+    $info | ConvertTo-Json | Set-Content $cache
+    return $info
+}
+
+function Get-EdgeLatestInfo {
+    <#
+    .SYNOPSIS
+        Looks up the latest stable Edge win MSI version, download URL, and
+        SHA-256 via Microsoft's Edge Updates API, caching the result in
+        $env:TEMP for -CacheHours.
+    .DESCRIPTION
+        Shared by Install-Browsers.ps1 and Push-Browsers.ps1 - see
+        Get-ChromeLatestInfo's .DESCRIPTION. The real edgeupdates.microsoft.com
+        response is a flat array of { Product, Releases: [ { Platform,
+        Architecture, ProductVersion, Artifacts: [ { Location, Hash } ] } ] } -
+        this repo's original Edge.ps1 (now archived) documents a real bug where
+        an earlier, wrong assumption about this shape broke every run.
+    #>
+    param([string]$Proxy, [int]$CacheHours = 4)
+
+    $arch  = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+    $cache = Join-Path $env:TEMP "browserdeploy-edge-$arch.json"
+    if ((Test-Path $cache) -and (Get-Item $cache).LastWriteTime -gt (Get-Date).AddHours(-$CacheHours)) {
+        return Get-Content $cache -Raw | ConvertFrom-Json
+    }
+    $iwArgs = @{ Uri = 'https://edgeupdates.microsoft.com/api/products?view=enterprise'; ErrorAction = 'Stop'; TimeoutSec = 15 }
+    if ($Proxy) { $iwArgs.Proxy = $Proxy }
+    $feed = Invoke-RestMethod @iwArgs
+    $channelObj = $feed | Where-Object { $_.Product -eq 'Stable' }
+    if (-not $channelObj) { throw "Channel 'Stable' not found in Edge Updates API response." }
+    $rel = $channelObj.Releases | Where-Object { $_.Platform -eq 'Windows' -and $_.Architecture -eq $arch } |
+        Sort-Object { [version]$_.ProductVersion } -Descending | Select-Object -First 1
+    if (-not $rel) { throw "No Edge release found for Platform=Windows/Architecture=$arch." }
+    $pkg = $rel.Artifacts | Where-Object { $_.Location -match '\.msi$' } | Select-Object -First 1
+    if (-not $pkg) { throw 'No MSI artifact found for the latest Edge release.' }
+    $info = [pscustomobject]@{
+        Version  = [version]$rel.ProductVersion
+        Sha256   = $pkg.Hash
+        FileName = [IO.Path]::GetFileName($pkg.Location)
+        Url      = $pkg.Location
+    }
+    $info | ConvertTo-Json | Set-Content $cache
+    return $info
+}
+
+function Get-FirefoxLatestInfo {
+    <#
+    .SYNOPSIS
+        Looks up the latest stable Firefox version and official MSI download
+        URL via Mozilla's product-details API, caching the result in $env:TEMP
+        for -CacheHours.
+    .DESCRIPTION
+        Shared by Install-Browsers.ps1 and Push-Browsers.ps1. 'firefox-msi-
+        latest-ssl' is Mozilla's documented download.mozilla.org product id for
+        the official win64 MSI - confirmed live during this module's own
+        development (actual download + Authenticode check), it 302-redirects to
+        download-installer.cdn.mozilla.net/pub/firefox/releases/<ver>/win64/en-US/Firefox Setup <ver>.msi
+        and is signed 'O=Mozilla Corporation'. Unlike Chrome/Edge's feeds, no
+        SHA-256 is published for it - callers must rely on the unconditional
+        Authenticode check they already do for every browser, not the optional
+        hash check, for this one.
+    #>
+    param([string]$Proxy, [int]$CacheHours = 4)
+
+    $cache = Join-Path $env:TEMP 'browserdeploy-firefox.json'
+    if ((Test-Path $cache) -and (Get-Item $cache).LastWriteTime -gt (Get-Date).AddHours(-$CacheHours)) {
+        return Get-Content $cache -Raw | ConvertFrom-Json
+    }
+    $iwArgs = @{ Uri = 'https://product-details.mozilla.org/1.0/firefox_versions.json'; ErrorAction = 'Stop' }
+    if ($Proxy) { $iwArgs.Proxy = $Proxy }
+    $versions = Invoke-RestMethod @iwArgs
+    $verStr = $versions.LATEST_FIREFOX_VERSION
+    if (-not $verStr) { throw 'Could not determine latest Firefox version from product-details.mozilla.org.' }
+    $parsedVersion = try { [version]$verStr } catch { [version]'0.0.0.0' }
+    $info = [pscustomobject]@{
+        Version  = $parsedVersion
+        Sha256   = $null
+        FileName = "Firefox Setup $verStr.msi"
+        Url      = 'https://download.mozilla.org/?product=firefox-msi-latest-ssl&os=win64&lang=en-US'
+    }
+    $info | ConvertTo-Json | Set-Content $cache
+    return $info
+}
+
+Export-ModuleMember -Function New-SingleInstanceLock, Close-SingleInstanceLock, Get-AdaptiveBitsPriority, Invoke-VerifiedDownload, Write-DeployLog, Get-ChromeLatestInfo, Get-EdgeLatestInfo, Get-FirefoxLatestInfo
