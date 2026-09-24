@@ -231,11 +231,22 @@ $updates  = Get-WindowsUpdate -Criteria $criteria -Category $cats -MicrosoftUpda
 
 if ($updates) {
     Write-Log "Installing $($updates.Count) update(s)…"
+    # -ErrorAction Continue means a per-update install failure writes to the
+    # error stream but doesn't stop the pipeline - deliberate, so one bad
+    # update doesn't abort the rest. But it also means this node's final
+    # [pscustomobject] (below) reported "Completed" purely because SOME
+    # result came back, regardless of whether every update actually
+    # installed - masking real per-update failures in the fleet-wide
+    # summary. $updateErrors captures them so the result can say so instead.
     $updates | Install-WindowsUpdate -AcceptAll -IgnoreReboot -MicrosoftUpdate `
-              -Verbose:$false -ErrorAction Continue
+              -Verbose:$false -ErrorAction Continue -ErrorVariable updateErrors
+    if ($updateErrors) {
+        Write-Log "WARNING: $($updateErrors.Count) of $($updates.Count) update(s) reported an install error."
+    }
     Write-Log "Installed $($updates.Count) update(s)"
 } else {
     Write-Log "No updates required"
+    $updateErrors = @()
 }
 
 # ---- reboot if needed ----
@@ -248,6 +259,9 @@ if ((Get-WURebootStatus).RebootNeeded) {
         # before the machine restarted. Lengthened to 5 minutes; /c already
         # surfaces a message via the built-in shutdown warning dialog.
         shutdown /r /t 300 /c "PatchSweep: this computer will restart in 5 minutes to finish installing updates. Save your work now."
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "WARNING: shutdown.exe failed to schedule the restart (exit $LASTEXITCODE) - node stays reported as pending reboot with no reboot actually scheduled."
+        }
     }
 }
 
@@ -300,6 +314,9 @@ $taskXml = @"
 $taskPath = "$env:SystemRoot\Temp\PatchSweepCatchup.xml"
 $taskXml | Out-File -Encoding unicode $taskPath
 schtasks /Create /TN "PatchSweepCatchup" /XML $taskPath /RU SYSTEM /F | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Log "WARNING: schtasks failed to create the offline catch-up task (exit $LASTEXITCODE) - this node loses its safety net for missed/suppressed updates until the next sweep."
+}
 Remove-Item $taskPath -Force
 
 # ---- stop transcript ----
@@ -323,10 +340,11 @@ Stop-Transcript | Out-Null
 # files back over the existing PSSession (Copy-Item -FromSession) and then
 # copy them on to $CentralShare itself.
 [pscustomobject]@{
-    ComputerName   = $env:COMPUTERNAME
-    Status         = 'Completed'
-    TranscriptPath = $trans
-    LocalLogPath   = $localLog
+    ComputerName     = $env:COMPUTERNAME
+    Status           = 'Completed'
+    UpdateErrorCount = @($updateErrors).Count
+    TranscriptPath   = $trans
+    LocalLogPath     = $localLog
 }
 } # --- end payload
 
@@ -347,50 +365,78 @@ foreach ($ring in $TargetChunks) {
             Write-Warning "Ring attempt $try : could not establish a PS session to $c"
         }
 
-        $job = Invoke-Command -Session $session -ScriptBlock $RemotePayload -ArgumentList `
-               $PSWUVersion,$NoDrivers,$NoFeatureUpgrades,$NoAutoReboot,`
-               $OffLineCatchupHours,$OffLineCatchupSpan -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue
+        # Invoke-Command's -Session parameter carries a hard
+        # ValidateNotNullOrEmpty attribute, so it throws a
+        # ParameterBindingValidationException at bind time - even with
+        # -ErrorAction SilentlyContinue, confirmed directly - if every
+        # machine in this retry batch failed to get a session above. With no
+        # try/catch around the ring loop, that exception used to abort the
+        # entire sweep: no further rings ran, and the summary file below was
+        # never written. Skip the call when there's nothing to invoke
+        # against instead.
+        if ($session) {
+            $job = Invoke-Command -Session $session -ScriptBlock $RemotePayload -ArgumentList `
+                   $PSWUVersion,$NoDrivers,$NoFeatureUpgrades,$NoAutoReboot,`
+                   $OffLineCatchupHours,$OffLineCatchupSpan -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue
 
-        # $job holds the [pscustomobject] each node returns at the end of
-        # $RemotePayload. Nodes that errored partway through, or never made
-        # it that far, simply won't have an entry here - there's no
-        # separate error bucket to check.
-        $completedComputers = $job | Select-Object -ExpandProperty PSComputerName -Unique
+            # $job holds the [pscustomobject] each node returns at the end of
+            # $RemotePayload. Nodes that errored partway through, or never made
+            # it that far, simply won't have an entry here - there's no
+            # separate error bucket to check.
+            $completedComputers = $job | Select-Object -ExpandProperty PSComputerName -Unique
 
-        foreach ($s in $session) {
-            $state = if ($s.ComputerName -in $completedComputers) { 'Completed' } else { 'Failed' }
-
-            # FIX 3 (continued): pull the transcript/log back from the remote
-            # machine over the already-authenticated PSSession, then copy
-            # them on to $CentralShare using the controller's own
-            # credentials - avoiding the double-hop that failed when this
-            # copy ran inside the remote session.
-            if ($state -eq 'Completed') {
+            foreach ($s in $session) {
                 $result = $job | Where-Object { $_.PSComputerName -eq $s.ComputerName } | Select-Object -First 1
-                if ($result -and $result.TranscriptPath -and $result.LocalLogPath) {
-                    try {
-                        $localTemp = Join-Path $env:TEMP "PatchSweep_$($s.ComputerName)"
-                        New-Item -ItemType Directory -Path $localTemp -Force | Out-Null
+                # A node reaching the end of $RemotePayload and returning a
+                # result at all is not the same as every update on it
+                # actually installing - Install-WindowsUpdate runs with
+                # -ErrorAction Continue there so one bad update doesn't abort
+                # the rest, which previously meant a node with real per-update
+                # failures still landed here as unqualified 'Completed'.
+                # UpdateErrorCount (added to the payload's return object)
+                # makes that visible instead of silently folding it into a
+                # clean-looking summary.
+                $state = if ($s.ComputerName -notin $completedComputers) {
+                    'Failed'
+                } elseif ($result -and $result.UpdateErrorCount -gt 0) {
+                    'CompletedWithErrors'
+                } else {
+                    'Completed'
+                }
 
-                        Copy-Item -FromSession $s -Path $result.TranscriptPath -Destination $localTemp -Force -ErrorAction Stop
-                        Copy-Item -FromSession $s -Path $result.LocalLogPath   -Destination $localTemp -Force -ErrorAction Stop
+                # FIX 3 (continued): pull the transcript/log back from the remote
+                # machine over the already-authenticated PSSession, then copy
+                # them on to $CentralShare using the controller's own
+                # credentials - avoiding the double-hop that failed when this
+                # copy ran inside the remote session.
+                if ($state -in 'Completed', 'CompletedWithErrors') {
+                    if ($result -and $result.TranscriptPath -and $result.LocalLogPath) {
+                        try {
+                            $localTemp = Join-Path $env:TEMP "PatchSweep_$($s.ComputerName)"
+                            New-Item -ItemType Directory -Path $localTemp -Force | Out-Null
 
-                        $localTrans = Join-Path $localTemp (Split-Path $result.TranscriptPath -Leaf)
-                        $localSumm  = Join-Path $localTemp (Split-Path $result.LocalLogPath   -Leaf)
+                            Copy-Item -FromSession $s -Path $result.TranscriptPath -Destination $localTemp -Force -ErrorAction Stop
+                            Copy-Item -FromSession $s -Path $result.LocalLogPath   -Destination $localTemp -Force -ErrorAction Stop
 
-                        Copy-Item -Path $localTrans -Destination (Join-Path $CentralLogShare "$($s.ComputerName).transcript.log") -Force -ErrorAction Stop
-                        Copy-Item -Path $localSumm  -Destination (Join-Path $CentralLogShare "$($s.ComputerName).summary.log")    -Force -ErrorAction Stop
-                    } catch {
-                        Write-Warning "Could not copy logs for $($s.ComputerName) to central share ${CentralLogShare}: $($_.Exception.Message)"
+                            $localTrans = Join-Path $localTemp (Split-Path $result.TranscriptPath -Leaf)
+                            $localSumm  = Join-Path $localTemp (Split-Path $result.LocalLogPath   -Leaf)
+
+                            Copy-Item -Path $localTrans -Destination (Join-Path $CentralLogShare "$($s.ComputerName).transcript.log") -Force -ErrorAction Stop
+                            Copy-Item -Path $localSumm  -Destination (Join-Path $CentralLogShare "$($s.ComputerName).summary.log")    -Force -ErrorAction Stop
+                        } catch {
+                            Write-Warning "Could not copy logs for $($s.ComputerName) to central share ${CentralLogShare}: $($_.Exception.Message)"
+                        }
                     }
                 }
+
+                $JobsSummary.Add([pscustomobject]@{
+                    ComputerName = $s.ComputerName
+                    State        = $state
+                    Attempt      = $try
+                })
             }
 
-            $JobsSummary.Add([pscustomobject]@{
-                ComputerName = $s.ComputerName
-                State        = $state
-                Attempt      = $try
-            })
+            Remove-PSSession $session
         }
         foreach ($c in $sessionFailed) {
             $JobsSummary.Add([pscustomobject]@{
@@ -403,8 +449,6 @@ foreach ($ring in $TargetChunks) {
         $remaining = $JobsSummary |
                      Where-Object { $_.State -ne 'Completed' -and $_.Attempt -eq $try } |
                      Select-Object -ExpandProperty ComputerName -Unique
-
-        Remove-PSSession $session
     }
 }
 

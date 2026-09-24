@@ -85,8 +85,17 @@ if (-not (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Silently
 # Stop services (exclude EventLog and RpcSs to avoid system impact)
 $servicesToStop = @("Winmgmt", "wscsvc", "iphlpsvc", "msiserver", "BITS")
 foreach ($svc in $servicesToStop) {
-    try { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue; Write-Log "Stopped: $svc" }
-    catch { Write-Log "Could not stop: $svc" "WARN" }
+    # -Force -ErrorAction SilentlyContinue makes this non-terminating, so a
+    # try/catch here never actually fires - check the real resulting status
+    # instead. Best-effort: a failure to stop one of these auxiliary
+    # services should not abort the repair.
+    Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+    $svcAfterStop = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($svcAfterStop -and $svcAfterStop.Status -ne 'Stopped') {
+        Write-Log "Could not stop: $svc (status: $($svcAfterStop.Status))" "WARN"
+    } else {
+        Write-Log "Stopped: $svc"
+    }
 }
 Start-Sleep -Seconds 5
 
@@ -162,8 +171,13 @@ Get-ChildItem *.mof, *.mfl -Recurse -ErrorAction SilentlyContinue | ForEach-Obje
 Pop-Location
 
 # Start WMI
-Start-Service winmgmt
-Write-Log "Started: winmgmt"
+try {
+    Start-Service winmgmt -ErrorAction Stop
+    Write-Log "Started: winmgmt"
+} catch {
+    Write-Log "Failed to start winmgmt: $_" "ERROR"
+    $script:hadFailure = $true
+}
 
 # Retries a command that returns a process exit code (DISM/SFC, both of
 # which can fail transiently - e.g. a momentarily locked file - and succeed
@@ -194,8 +208,17 @@ if ($exitCode -ne 0) { Write-Log "SFC encountered issues." "WARN"; $script:hadFa
 
 # Restart services
 foreach ($svc in $servicesToStop) {
-    try { Start-Service -Name $svc -ErrorAction SilentlyContinue; Write-Log "Started: $svc" }
-    catch { Write-Log "Could not start: $svc" "WARN" }
+    # -ErrorAction SilentlyContinue makes this non-terminating, so a
+    # try/catch here never actually fires - check the real resulting status
+    # instead. Best-effort: a failure to start one of these auxiliary
+    # services should not abort the repair.
+    Start-Service -Name $svc -ErrorAction SilentlyContinue
+    $svcAfterStart = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($svcAfterStart -and $svcAfterStart.Status -eq 'Running') {
+        Write-Log "Started: $svc"
+    } else {
+        Write-Log "Could not start: $svc$(if ($svcAfterStart) { " (status: $($svcAfterStart.Status))" })" "WARN"
+    }
 }
 
 # Final verification - the exit code and "completed" message below only

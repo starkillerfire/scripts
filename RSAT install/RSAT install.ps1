@@ -19,6 +19,7 @@ param(
 )
 
 Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
 Write-Host "Scanning for RSAT features..." -ForegroundColor Cyan
 

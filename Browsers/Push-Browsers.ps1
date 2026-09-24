@@ -9,8 +9,13 @@
 
 .DESCRIPTION
     Pushes an install/update of one or more browsers to a list of REMOTE
-    machines via PsExec + robocopy (WinRM/PSRemoting is not available in this
-    environment, same as the four scripts this replaces). Not the same tool as
+    machines via PsExec + robocopy - the same transport as the four scripts
+    this replaces, kept deliberately rather than switched to WinRM/PSSession
+    remoting: WinRM is available on this fleet's older, AD-joined machines,
+    but this repo is actively moving toward Intune-managed, non-domain-joined
+    devices, where PsExec's local-admin-credential-over-SMB model keeps
+    working without the Kerberos/domain-trust assumptions WinRM remoting
+    needs. Not the same tool as
     ..\Intune PreDeployment Scripts\Browsers\Install-Browsers.ps1, which installs
     only on the local machine it's run on.
 
@@ -58,6 +63,17 @@
     Output CSV for machines that failed, per browser. Defaults to
     Failed-<Browser>-<timestamp>.csv under WorkingRoot.
 
+.PARAMETER MaxTargets
+    Safety valve: if the resolved target list (-ComputerName/-CsvPath)
+    exceeds this count, an explicit typed confirmation is required (or the
+    run aborts outright in a non-interactive session) before any machine is
+    touched. Defaults to 50.
+
+.PARAMETER PsExecTimeoutSeconds
+    Per-machine timeout for the PsExec install call, in seconds. If a remote
+    msiexec hangs past this, PsExec is killed and that machine is recorded
+    as failed rather than stalling the whole run. Defaults to 300.
+
 .EXAMPLE
     .\Push-Browsers.ps1 -Browser Chrome -CsvPath .\computers.csv
     Downloads the latest Chrome fresh, pushes it to every machine in the CSV.
@@ -82,7 +98,20 @@ param(
     [int]      $CacheHours  = 4,
     [string]   $FailedCsv,
     [switch]   $NoHashCheck,
-    [switch]   $NoResume
+    [switch]   $NoResume,
+
+    # Safety valve: a -CsvPath that unexpectedly expands to a huge machine
+    # list must not silently push-install to every match. Above this count,
+    # an explicit typed confirmation is required before the push loop
+    # starts. Mirrors ..\Windows 10 patching\Windows 10 patching.ps1's
+    # -MaxTargets.
+    [int]      $MaxTargets = 50,
+
+    # PsExec itself blocks until the remote process exits, so without a
+    # timeout a single hung remote msiexec stalls this entire multi-machine
+    # loop indefinitely. 300s (5 min) default - a browser MSI install is
+    # usually a couple of minutes; override for slower/loaded machines.
+    [int]      $PsExecTimeoutSeconds = 300
 )
 
 Set-StrictMode -Version Latest
@@ -132,6 +161,26 @@ $computers = [System.Collections.Generic.List[string]]::new()
 if ($ComputerName) { $computers.Add($ComputerName) }
 if ($CsvPath)      { (Import-Csv -Path $CsvPath).ComputerName | ForEach-Object { $computers.Add($_) } }
 if ($computers.Count -eq 0) { throw 'Provide -ComputerName or -CsvPath.' }
+
+# Safety valve: a -CsvPath that resolves to far more machines than intended
+# must not silently push-install to the whole list. Above -MaxTargets,
+# require a typed confirmation before anything below touches a single
+# machine. $PSCmdlet.ShouldContinue() was considered, but it throws outright
+# (rather than degrading safely) when the host can't prompt (e.g.
+# unattended/SYSTEM context) - a plain Read-Host with an explicit
+# non-interactive check fails closed instead, matching the pattern in
+# ..\Windows 10 patching\Windows 10 patching.ps1.
+if ($computers.Count -gt $MaxTargets) {
+    Write-Warning "Resolved target list contains $($computers.Count) computer(s), which exceeds the safety threshold of $MaxTargets (see -MaxTargets to raise it). This run will push-install to every matched machine."
+    if (-not [Environment]::UserInteractive) {
+        throw "Aborting: $($computers.Count) resolved target(s) exceeds -MaxTargets ($MaxTargets) and this session is non-interactive, so explicit confirmation cannot be collected. Re-run interactively to confirm, or pass a higher -MaxTargets if this scale is intentional."
+    }
+    $confirmation = Read-Host "Type YES to confirm pushing to $($computers.Count) machine(s)"
+    if ($confirmation -ne 'YES') {
+        Write-Warning "Aborted: confirmation not received for a $($computers.Count)-machine run."
+        exit 0
+    }
+}
 
 if (-not (Test-Path $PsExecPath)) { throw "PsExec not found: $PsExecPath" }
 if ($SourcePath -and -not (Test-Path $SourcePath)) { throw "Source path not found: $SourcePath" }
@@ -229,6 +278,20 @@ function Get-StagedInstaller {
             -LogAction { param($Message, $Level) if ($Level -eq 'Warning') { Write-Warning $Message } else { Write-Verbose $Message } }
     }
 
+    $msiName = Split-Path $msiPath -Leaf
+    # $msiName is embedded verbatim into a `cmd /c` string run via PsExec as
+    # SYSTEM on every target machine below (see Push-OneBrowser). It comes
+    # from either an arbitrary -SourcePath folder or a vendor feed's
+    # FileName field, so it must be validated here - once, before any
+    # machine is touched - rather than trusted as-is: a name containing "
+    # would break the quoting, and one containing &/|/^ could inject
+    # additional shell commands. Known-good names are plain ASCII with
+    # spaces (e.g. Firefox's "Firefox Setup 129.0.msi" from
+    # Get-FirefoxLatestInfo), so the allowed set is deliberately narrow.
+    if ($msiName -notmatch '^[A-Za-z0-9 ._\-]+\.msi$') {
+        throw "Refusing to deploy $Name installer: filename '$msiName' contains characters outside the safe set (letters, digits, space, dot, underscore, hyphen, ending in .msi) - refusing to embed it in a remote command line."
+    }
+
     # Unconditional - independent of any hash check above (which silently
     # no-ops for a feed that doesn't publish one, e.g. Firefox's, and isn't
     # run at all in -SourcePath mode). This is the real integrity gate before
@@ -246,7 +309,11 @@ function Push-OneBrowser {
     # $PSCmdlet is unpopulated inside a plain function, so .ShouldProcess() below
     # would throw a null-reference at runtime without this.
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$MsiPath)
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$MsiPath,
+        [int]$PsExecTimeoutSeconds = 300
+    )
 
     $def       = $BrowserDefs[$Name]
     $msiName   = Split-Path $MsiPath -Leaf
@@ -279,8 +346,34 @@ function Push-OneBrowser {
                     continue
                 }
 
-                $psexecOutput = & $PsExecPath "\\$computer" -s -accepteula cmd /c "msiexec.exe /I `"$remoteMsi`" /qn /norestart" 2>&1
-                $rc = $LASTEXITCODE
+                # PsExec itself blocks until the remote process exits, so the
+                # call operator ($proc = & $PsExecPath ...) gives no Process
+                # handle to wait on with a timeout - a hung remote msiexec
+                # would stall this entire multi-machine loop indefinitely.
+                # Start-Process -PassThru does give a handle, at the cost of
+                # losing the simple `2>&1` capture the old `&` form had, so
+                # stdout/stderr are redirected to temp files and read back
+                # below for the same warning-message behavior on failure.
+                $psexecArgs   = @("\\$computer", '-s', '-accepteula', 'cmd', '/c', "msiexec.exe /I `"$remoteMsi`" /qn /norestart")
+                $stdOutFile   = [System.IO.Path]::GetTempFileName()
+                $stdErrFile   = [System.IO.Path]::GetTempFileName()
+                $psexecOutput = $null
+                $rc           = $null
+                try {
+                    $psexecProc = Start-Process -FilePath $PsExecPath -ArgumentList $psexecArgs -PassThru -NoNewWindow `
+                                  -RedirectStandardOutput $stdOutFile -RedirectStandardError $stdErrFile -ErrorAction Stop
+                    $psexecExited = $psexecProc.WaitForExit($PsExecTimeoutSeconds * 1000)
+                    if (-not $psexecExited) {
+                        $psexecProc.Kill()
+                        Write-Warning "[$computer] PsExec did not complete within ${PsExecTimeoutSeconds}s and was terminated (see -PsExecTimeoutSeconds) - treating $computer as failed."
+                        $failed.Add($computer)
+                        continue
+                    }
+                    $rc           = $psexecProc.ExitCode
+                    $psexecOutput = @(Get-Content -Path $stdOutFile -ErrorAction SilentlyContinue) + @(Get-Content -Path $stdErrFile -ErrorAction SilentlyContinue)
+                } finally {
+                    Remove-Item -Path $stdOutFile, $stdErrFile -Force -ErrorAction SilentlyContinue
+                }
 
                 if ($rc -in @(0, 3010, 1641)) {
                     $afterVer = Get-RemoteBrowserVersion -ComputerName $computer -DisplayNamePattern $def.DisplayNamePattern
@@ -314,7 +407,7 @@ $allResults = foreach ($b in $Browser) {
     Write-Host "=== $b ===" -ForegroundColor Cyan
     try {
         $msiPath = Get-StagedInstaller -Name $b
-        Push-OneBrowser -Name $b -MsiPath $msiPath
+        Push-OneBrowser -Name $b -MsiPath $msiPath -PsExecTimeoutSeconds $PsExecTimeoutSeconds
     } catch {
         Write-Warning "$b - aborted before any machine was touched: $_"
         [pscustomobject]@{ Browser = $b; Succeeded = @(); Failed = @($computers) }

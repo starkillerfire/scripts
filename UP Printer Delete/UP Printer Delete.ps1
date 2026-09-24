@@ -41,14 +41,18 @@ $TargetList = Get-Content -LiteralPath $NamesFile | ForEach-Object { $_.Trim() }
 $TargetList = $TargetList | Select-Object -Unique
 
 # Optional Include/Exclude filtering (wildcards allowed)
+# Under Set-StrictMode, .Count throws on a pipeline result that resolves to
+# zero or exactly one match (it comes back as $null or a bare scalar, neither
+# of which has a .Count property) - which is the common case here since
+# -Include/-Exclude are typically a single pattern. @()-wrap first.
 if ($Include) {
   $TargetList = $TargetList | Where-Object {
-    $name = $_; ($Include | Where-Object { $name -like $_ }).Count -gt 0
+    $name = $_; @($Include | Where-Object { $name -like $_ }).Count -gt 0
   }
 }
 if ($Exclude) {
   $TargetList = $TargetList | Where-Object {
-    $name = $_; ($Exclude | Where-Object { $name -like $_ }).Count -eq 0
+    $name = $_; @($Exclude | Where-Object { $name -like $_ }).Count -eq 0
   }
 }
 
@@ -328,7 +332,11 @@ foreach ($t in $TargetList) {
   if ($found) { foreach($p in $found){ [void]$printersToDelete.Add($p) } }
   else { $null = $notFound.Add($t) }
 }
-$printersToDelete = $printersToDelete | Sort-Object Id -Unique
+# @()-wrapped: a single-match or zero-match result here would otherwise be a
+# bare scalar/$null with no .Count property, which throws under
+# Set-StrictMode at every .Count reference below (List-only summary,
+# progress-loop $tot, and the caller's own use of this variable).
+$printersToDelete = @($printersToDelete | Sort-Object Id -Unique)
 
 foreach ($nf in $notFound) { Write-UPLog $nf '' 'Lookup' 'NotFound' 'No printer or share with exact displayName' }
 
@@ -411,10 +419,15 @@ foreach ($p in $printersToDelete) {
 Write-Progress -Activity "Removing Universal Print objects" -Completed
 
 # (6) Summary
-$okDeletes   = ($Log | Where-Object { $_.Action -eq 'DeletePrinter' -and $_.Status -like 'OK*' }).Count
-$errDeletes  = ($Log | Where-Object { $_.Action -eq 'DeletePrinter' -and $_.Status -eq 'Error' }).Count
-$okUnshares  = ($Log | Where-Object { $_.Action -eq 'Unshare'       -and $_.Status -eq 'OK' }).Count
-$errUnshares = ($Log | Where-Object { $_.Action -eq 'Unshare'       -and $_.Status -eq 'Error' }).Count
+# @()-wrapped: on a clean run with zero errors (the common, desired case),
+# the Where-Object filter below matches nothing and returns $null, which has
+# no .Count property under Set-StrictMode - this used to crash here, after
+# real deletions had already happened and before the CSV audit trail below
+# was ever written.
+$okDeletes   = @($Log | Where-Object { $_.Action -eq 'DeletePrinter' -and $_.Status -like 'OK*' }).Count
+$errDeletes  = @($Log | Where-Object { $_.Action -eq 'DeletePrinter' -and $_.Status -eq 'Error' }).Count
+$okUnshares  = @($Log | Where-Object { $_.Action -eq 'Unshare'       -and $_.Status -eq 'OK' }).Count
+$errUnshares = @($Log | Where-Object { $_.Action -eq 'Unshare'       -and $_.Status -eq 'Error' }).Count
 Write-Host ("Summary: Printers OK={0}, Errors={1}; Unshares OK={2}, Errors={3}; NotFound={4}" -f $okDeletes,$errDeletes,$okUnshares,$errUnshares,$notFound.Count)
 
 # ---- Save CSV log ----

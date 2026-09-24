@@ -83,7 +83,10 @@ try {
         # which -FilePath can't bind to a single path string).
         $vcExe = Get-ChildItem (Join-Path $root "Prerequisite\$vc") -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $vcExe) { throw "No prerequisite installer .exe found for $vc under $root\Prerequisite\$vc" }
-        Start-Process $vcExe.FullName -ArgumentList '/install','/quiet','/norestart' -Wait
+        $vcProc = Start-Process $vcExe.FullName -ArgumentList '/install','/quiet','/norestart' -Wait -PassThru
+        # 3010 = reboot required, 1638 = a newer redist is already present;
+        # both are normal successful outcomes for a VC++ redist.
+        if ($vcProc.ExitCode -notin @(0, 3010, 1638)) { throw "$vc exited with $($vcProc.ExitCode)" }
     }
 
     # 4. Main ScanSnap components (silent with .ISS)

@@ -47,6 +47,17 @@ function New-SingleInstanceLock {
 }
 
 function Close-SingleInstanceLock {
+    <#
+    .SYNOPSIS
+        Releases a lock taken by New-SingleInstanceLock and removes the lock
+        file.
+    .DESCRIPTION
+        Accepts a $null stream so callers can release unconditionally in a
+        finally block without first checking whether the lock was actually
+        acquired. Closing the stream and deleting the file are both
+        best-effort - a cleanup failure here must never mask the deployment's
+        own result.
+    #>
     param(
         [Parameter(Mandatory)][AllowNull()][System.IO.FileStream]$LockStream,
         [Parameter(Mandatory)][string]$Path

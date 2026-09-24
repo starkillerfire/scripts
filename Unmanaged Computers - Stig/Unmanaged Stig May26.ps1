@@ -184,9 +184,26 @@ param(
     # reboot was scheduled, so a crashed/interrupted run doesn't get quietly
     # reported as if it had finished cleanly. Pass -Force to proceed anyway
     # (e.g. resuming by hand after independently confirming remediation did
-    # complete).
+    # complete). This switch affects ONLY that resume-marker check - it has
+    # no effect on the destructive-change confirmation prompt below (see
+    # -SkipDestructiveConfirmation).
     [Parameter(Mandatory = $false)]
     [switch]$Force,
+
+    # Rename-BuiltInAccounts (renames the built-in Administrator/Guest
+    # accounts) and Invoke-BitLockerRemediation (rewrites BitLocker
+    # protectors) are destructive and hard to reverse. Outside
+    # -InteractiveMenu, this script normally pauses for an interactive
+    # Read-StigYesNo confirmation before running either one. Pass this
+    # switch to skip that confirmation prompt and proceed automatically -
+    # intended for scripted/unattended invocations where the operator has
+    # already made the call out-of-band. This is intentionally a separate
+    # switch from -Force: -Force is documented above solely as resuming
+    # post-reboot validation without the completion marker, and does not
+    # (and should not) also pre-approve an unattended account rename /
+    # BitLocker protector rewrite.
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipDestructiveConfirmation,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipSystemReadiness,
@@ -1558,7 +1575,21 @@ function Export-StigBackup {
         @{ Name='HKLM_System_CurrentControlSet_Services'; Path='HKLM\SYSTEM\CurrentControlSet\Services' },
         @{ Name='HKLM_Software_Microsoft_Windows_CurrentVersion_Policies'; Path='HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies' },
         @{ Name='HKLM_Software_Microsoft_WindowsNT_CurrentVersion_Winlogon'; Path='HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' },
-        @{ Name='HKLM_Software_Classes'; Path='HKLM\SOFTWARE\Classes' }
+        @{ Name='HKLM_Software_Classes'; Path='HKLM\SOFTWARE\Classes' },
+        # These five close a gap between what Test-SafeRegistryTarget's
+        # $safePrefixes allowlist permits the SCAP-driven OVAL remediation
+        # path (Invoke-ScapDrivenRegistryRemediation -> Set-StigRegistryValue)
+        # to write to, and what was actually being backed up here - a real
+        # OVAL rule targeting one of these (e.g. EarlyLaunch AntiMalware
+        # policy) could previously be written with no corresponding backup,
+        # so Rollback-STIG-Changes.ps1 had nothing to restore it from. Each
+        # maps directly to one of the extra $safePrefixes entries in
+        # Test-SafeRegistryTarget.
+        @{ Name='HKLM_System_CurrentControlSet_Policies_EarlyLaunch'; Path='HKLM\SYSTEM\CurrentControlSet\Policies\EarlyLaunch' },
+        @{ Name='HKLM_Software_Microsoft_Windows_CurrentVersion_DeliveryOptimization_Config'; Path='HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config' },
+        @{ Name='HKLM_Software_Microsoft_PolicyManager_Current_Device_Connectivity'; Path='HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\Connectivity' },
+        @{ Name='HKLM_Software_Microsoft_WcmSvc_WifiNetworkManager_Config'; Path='HKLM\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config' },
+        @{ Name='HKLM_Software_Microsoft_BluetoothAuthenticationAgent'; Path='HKLM\SOFTWARE\Microsoft\BluetoothAuthenticationAgent' }
     )) {
         Invoke-NativeCommand -FilePath reg.exe -ArgumentList @('export', $reg.Path, (Join-Path $backupPath "$($reg.Name).reg"), '/y') -IgnoreExitCode | Out-Null
     }
@@ -3111,9 +3142,10 @@ try {
         # outside that menu (e.g. straight CLI/unattended invocation) gate
         # them behind the same Read-StigYesNo confirmation pattern used
         # elsewhere in this script (see -UseEveryoneForDenyRdp above), or
-        # require -Force to skip the prompt.
+        # require -SkipDestructiveConfirmation to skip the prompt. This is
+        # deliberately NOT gated on -Force - see -Force's own param comment.
         $confirmedDestructiveChanges = $true
-        if (-not $InteractiveMenu -and -not $Force) {
+        if (-not $InteractiveMenu -and -not $SkipDestructiveConfirmation) {
             $confirmedDestructiveChanges = Read-StigYesNo -Prompt 'About to rename the built-in Administrator/Guest accounts and rewrite BitLocker protectors (TPM+PIN / recovery password) on this machine. These changes are destructive and hard to reverse. Proceed?' -DefaultYes $false
         }
 
@@ -3127,7 +3159,7 @@ try {
             catch { Add-OutstandingItem "Renaming built-in Administrator/Guest accounts failed: $($_.Exception.Message)" }
         }
         else {
-            Add-OutstandingItem 'Renaming built-in Administrator/Guest accounts was skipped - operator declined the confirmation prompt (use -InteractiveMenu or -Force to proceed without prompting).'
+            Add-OutstandingItem 'Renaming built-in Administrator/Guest accounts was skipped - operator declined the confirmation prompt (use -InteractiveMenu or -SkipDestructiveConfirmation to proceed without prompting).'
         }
         Invoke-FeatureAndServiceRemediation
         Invoke-HardCodedRegistryRemediation
@@ -3152,7 +3184,7 @@ try {
             finally { Resume-StigTranscript }
         }
         elseif ($null -ne $StartupPin) {
-            Add-OutstandingItem 'BitLocker TPM+PIN remediation was skipped - operator declined the confirmation prompt (use -InteractiveMenu or -Force to proceed without prompting).'
+            Add-OutstandingItem 'BitLocker TPM+PIN remediation was skipped - operator declined the confirmation prompt (use -InteractiveMenu or -SkipDestructiveConfirmation to proceed without prompting).'
         }
         else {
             Add-OutstandingItem 'BitLocker TPM+PIN policy was written, but full BitLocker TPM+PIN enablement was not completed because -StartupPin was not supplied.'

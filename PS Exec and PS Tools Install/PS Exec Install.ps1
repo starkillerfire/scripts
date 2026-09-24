@@ -43,7 +43,7 @@ $zipPath = Join-Path $env:TEMP 'PSTools.zip'
 # --- Step 1: Download ---
 Write-Host "Downloading PSTools from Sysinternals..." -ForegroundColor Cyan
 try {
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
     Write-Host "Download complete: $zipPath" -ForegroundColor Green
 } catch {
     Write-Error "Download failed: $($_.Exception.Message)"

@@ -104,6 +104,10 @@ function Get-LastHashValue {
     The last hash value for the app.
 #>
 function Remove-FailedAppRegistryKeys {
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts here - this remediation runs unattended
+    # under Intune - while -WhatIf still works for testing.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param (
         [string]$userObjectId,
         [string]$appId,
@@ -118,8 +122,10 @@ function Remove-FailedAppRegistryKeys {
 
     foreach ($path in $pathsToRemove) {
         if (Test-Path -Path $path) {
-            Remove-Item -Path $path -Recurse -Force
-            Write-Host "Removed registry key: $path"
+            if ($PSCmdlet.ShouldProcess($path, 'Remove registry key')) {
+                Remove-Item -Path $path -Recurse -Force
+                Write-Host "Removed registry key: $path"
+            }
         }
         else {
             Write-Host "Registry key not found: $path"

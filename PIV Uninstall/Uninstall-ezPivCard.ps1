@@ -59,6 +59,9 @@ param(
     [int]$TimeoutSeconds
 )
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 #region --- Configuration ---
 
 # Root directory for all logs written by this script.
@@ -177,8 +180,10 @@ function Invoke-LogRotation {
     )
     if ($KeepCount -lt 0) { $KeepCount = 0 }
 
-    $logs = Get-ChildItem -Path $Path -Filter $Filter -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending
+    # @() wrap is required under StrictMode: a single matching file collapses
+    # the pipeline result to a scalar FileInfo, and .Count on a scalar throws.
+    $logs = @(Get-ChildItem -Path $Path -Filter $Filter -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending)
 
     if ($logs.Count -gt $KeepCount) {
         foreach ($file in ($logs | Select-Object -Skip $KeepCount)) {
@@ -260,7 +265,10 @@ Register-AppEventSource -Source $eventLogSource
 Invoke-LogRotation -Path $logDir -Filter 'Uninstall-ezPivCard_*.log' -KeepCount ($transcriptKeepCount - 1)
 
 $transcript = "$logDir\Uninstall-ezPivCard_$($startTime.ToString('yyyy-MM-dd_HHmmss')).log"
-Start-Transcript -Path $transcript -Append | Out-Null
+# -ErrorAction SilentlyContinue: transcript logging is best-effort and runs
+# before the try/finally below, so under $ErrorActionPreference = 'Stop' an
+# unhandled failure here would abort the whole uninstall before it starts.
+Start-Transcript -Path $transcript -Append -ErrorAction SilentlyContinue | Out-Null
 
 #endregion
 
@@ -340,8 +348,17 @@ try {
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
     )
 
+    # Select-Object normalizes every entry to a fixed property set before
+    # filtering. Under StrictMode, accessing $_.DisplayName on a raw
+    # Get-ItemProperty result throws for any Uninstall subkey that has no
+    # DisplayName value at all (common - many subkeys are hotfix/component
+    # entries with only a handful of values) rather than returning $null.
+    # Selecting these properties up front guarantees they exist (as $null
+    # when absent from the registry) on every object the rest of the script
+    # reads from $found/$entry below.
     $found = Get-ChildItem -Path $registryPaths -ErrorAction SilentlyContinue |
              Get-ItemProperty -ErrorAction SilentlyContinue |
+             Select-Object DisplayName, DisplayVersion, Publisher, InstallDate, InstallLocation, UninstallString |
              Where-Object { $_.DisplayName -like 'ezPivCard*' }
 
     if (-not $found) {
@@ -611,7 +628,10 @@ try {
             Write-Host 'Restarting...' -ForegroundColor Cyan
             # Stop transcript before restart so the log is properly closed.
             Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
-            Restart-Computer -Force
+            # -ErrorAction SilentlyContinue: this is the last meaningful step;
+            # a failure here shouldn't prevent the script from reaching its
+            # already-computed exit code below.
+            Restart-Computer -Force -ErrorAction SilentlyContinue
         } else {
             Write-Host 'Restart deferred. Please restart as soon as possible.' -ForegroundColor Yellow
         }
@@ -622,7 +642,9 @@ try {
     # Open the transcript log in Notepad so the user can review it without hunting for the file.
     if ($showUI -and $openLogWhenDone) {
         Write-Host "`nLog file: $transcript" -ForegroundColor DarkGray
-        Start-Process 'notepad.exe' -ArgumentList $transcript
+        # -ErrorAction SilentlyContinue: opening the log for convenience
+        # should never prevent the script from reaching `exit $exitCode`.
+        Start-Process 'notepad.exe' -ArgumentList $transcript -ErrorAction SilentlyContinue
     }
 
     exit $exitCode

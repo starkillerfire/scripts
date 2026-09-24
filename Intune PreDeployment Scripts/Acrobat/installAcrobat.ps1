@@ -17,6 +17,8 @@
 # than BEGIN/PROCESS/END blocks - those only run PROCESS once per pipeline
 # item, and with zero items piped in (the normal "-File installAcrobat.ps1"
 # invocation used everywhere this is called), PROCESS never ran at all.
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatically speeds up downloads
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -230,10 +232,16 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
 
         # ----------- prerequisite: VC++ 2013 x64 -----------
         Write-Log "Checking for Microsoft Visual C++ 2013 Redistributable (x64)..."
+        # Select-Object normalizes every entry to a fixed property set before
+        # filtering. Under StrictMode, accessing $_.DisplayName on a raw
+        # Get-ItemProperty result throws for any Uninstall subkey that has no
+        # DisplayName value at all (common - many subkeys are hotfix/component
+        # entries with only a handful of values) rather than returning $null.
         $vc2013 = @(
             Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' `
                 -ErrorAction SilentlyContinue |
+            Select-Object DisplayName, DisplayVersion |
             Where-Object { $_.DisplayName -like '*Visual C++*2013*' -and $_.DisplayName -like '*x64*' }
         )
 
@@ -266,10 +274,14 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
             $needsPatch = $true
         } else {
             # Query registry directly - avoids Win32_Product which triggers MSI repair on every installed app
+            # Select-Object normalizes every entry to a fixed property set
+            # before filtering - see the same fix on $vc2013 above for why
+            # this is required under StrictMode.
             $legacy = @(
                 Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                                  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' `
                     -ErrorAction SilentlyContinue |
+                Select-Object DisplayName, DisplayVersion, UninstallString |
                 Where-Object {
                     $_.DisplayName -match 'Adobe Acrobat' -and
                     $_.DisplayVersion -and [Version]$_.DisplayVersion -lt [Version]'20.0'

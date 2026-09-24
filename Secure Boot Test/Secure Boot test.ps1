@@ -296,19 +296,25 @@ function Get-CctkExitMeaning {
 }
 
 function Disable-DellLegacyOrom {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    [OutputType([bool])]
+    param()
+
     $changed = $false
 
     # CCTK path is the most reliable/documented for this.
-    $cctk = Invoke-Cctk -Arguments @('--legacyorom=disable')
-    if ($cctk.Found) {
-        if ($cctk.ExitCode -eq 0) {
-            Write-Log 'Legacy Option ROM disable command issued successfully.'
-            return $true
-        }
-        else {
-            $meaning = Get-CctkExitMeaning -Code $cctk.ExitCode
-            if ($meaning) {
-                Write-Log ("CCTK legacyorom result: {0}" -f $meaning) 'WARN'
+    if ($PSCmdlet.ShouldProcess('Dell BIOS: Legacy Option ROM', "Disable via cctk.exe --legacyorom=disable")) {
+        $cctk = Invoke-Cctk -Arguments @('--legacyorom=disable')
+        if ($cctk.Found) {
+            if ($cctk.ExitCode -eq 0) {
+                Write-Log 'Legacy Option ROM disable command issued successfully.'
+                return $true
+            }
+            else {
+                $meaning = Get-CctkExitMeaning -Code $cctk.ExitCode
+                if ($meaning) {
+                    Write-Log ("CCTK legacyorom result: {0}" -f $meaning) 'WARN'
+                }
             }
         }
     }
@@ -326,9 +332,11 @@ function Disable-DellLegacyOrom {
 
             foreach ($path in $candidatePaths) {
                 if (Test-Path $path) {
-                    Set-Item -Path $path -Value 'Disabled' -ErrorAction Stop
-                    Write-Log ("Set Dell BIOS attribute: {0} = Disabled" -f $path)
-                    $changed = $true
+                    if ($PSCmdlet.ShouldProcess($path, "Set Dell BIOS attribute to 'Disabled'")) {
+                        Set-Item -Path $path -Value 'Disabled' -ErrorAction Stop
+                        Write-Log ("Set Dell BIOS attribute: {0} = Disabled" -f $path)
+                        $changed = $true
+                    }
                     break
                 }
             }
@@ -342,15 +350,21 @@ function Disable-DellLegacyOrom {
 }
 
 function Enable-DellSecureBoot {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    [OutputType([bool])]
+    param()
+
     $changed = $false
 
     # Provider first for SecureBoot token
     try {
         if (Import-DellProvider) {
             if (Test-Path 'DellSmbios:\SecureBoot\SecureBoot') {
-                Set-Item -Path 'DellSmbios:\SecureBoot\SecureBoot' -Value 'Enabled' -ErrorAction Stop
-                Write-Log 'Set Dell BIOS attribute: DellSmbios:\SecureBoot\SecureBoot = Enabled'
-                return $true
+                if ($PSCmdlet.ShouldProcess('DellSmbios:\SecureBoot\SecureBoot', "Set Dell BIOS attribute to 'Enabled'")) {
+                    Set-Item -Path 'DellSmbios:\SecureBoot\SecureBoot' -Value 'Enabled' -ErrorAction Stop
+                    Write-Log 'Set Dell BIOS attribute: DellSmbios:\SecureBoot\SecureBoot = Enabled'
+                    return $true
+                }
             }
         }
     }
@@ -359,16 +373,18 @@ function Enable-DellSecureBoot {
     }
 
     # CCTK fallback
-    $cctk = Invoke-Cctk -Arguments @('--secureboot=enable')
-    if ($cctk.Found) {
-        if ($cctk.ExitCode -eq 0) {
-            Write-Log 'CCTK Secure Boot enable command issued successfully.'
-            return $true
-        }
-        else {
-            $meaning = Get-CctkExitMeaning -Code $cctk.ExitCode
-            if ($meaning) {
-                Write-Log ("CCTK secureboot result: {0}" -f $meaning) 'WARN'
+    if ($PSCmdlet.ShouldProcess('Dell BIOS: Secure Boot', "Enable via cctk.exe --secureboot=enable")) {
+        $cctk = Invoke-Cctk -Arguments @('--secureboot=enable')
+        if ($cctk.Found) {
+            if ($cctk.ExitCode -eq 0) {
+                Write-Log 'CCTK Secure Boot enable command issued successfully.'
+                return $true
+            }
+            else {
+                $meaning = Get-CctkExitMeaning -Code $cctk.ExitCode
+                if ($meaning) {
+                    Write-Log ("CCTK secureboot result: {0}" -f $meaning) 'WARN'
+                }
             }
         }
     }
@@ -399,13 +415,19 @@ function Start-SecureBootTask {
 }
 
 function Set-AvailableUpdates5944 {
-    $rootPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot'
-    if (-not (Test-Path $rootPath)) {
-        New-Item -Path $rootPath -Force | Out-Null
-    }
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
 
-    New-ItemProperty -Path $rootPath -Name 'AvailableUpdates' -PropertyType DWord -Value 0x5944 -Force | Out-Null
-    Write-Log 'Set HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates = 0x5944'
+    $rootPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot'
+
+    if ($PSCmdlet.ShouldProcess("$rootPath\AvailableUpdates", 'Set registry DWord value to 0x5944')) {
+        if (-not (Test-Path $rootPath)) {
+            New-Item -Path $rootPath -Force | Out-Null
+        }
+
+        New-ItemProperty -Path $rootPath -Name 'AvailableUpdates' -PropertyType DWord -Value 0x5944 -Force | Out-Null
+        Write-Log 'Set HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates = 0x5944'
+    }
 }
 
 # ----------------------------

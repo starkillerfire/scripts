@@ -56,7 +56,7 @@ $Version = '6.5.0'
 if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
 
 if ($SelfHostPwsh7 -and $PSVersionTable.PSVersion.Major -lt 7) {
-    if ($pwsh = Get-Command pwsh.exe -EA 0) { & $pwsh.Path -File $PSCommandPath @PSBoundParameters; exit }
+    if ($pwsh = Get-Command pwsh.exe -EA 0) { & $pwsh.Path -File $PSCommandPath @PSBoundParameters; exit $LASTEXITCODE }
 }
 
 $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -105,6 +105,31 @@ function Write-Log {
     @{ts=(Get-Date -Format o);level=$Level;msg=$Message}|ConvertTo-Json -Compress >> $JsonLog
 }
 Write-Log "DCU script version $Version" 'DEBUG'
+
+# ─── PROCESS TIMEOUT HELPER ────────────────────────────────────────────────────
+# Mirrors ..\Acrobat\installAcrobat.ps1's Invoke-Process helper: launches via
+# Start-Process -PassThru and waits up to -TimeoutSeconds via WaitForExit(),
+# killing the process and returning -1 on timeout instead of blocking forever
+# the way a plain -Wait does. Shared by every Start-Process call site below
+# that previously had no timeout at all.
+function Invoke-ProcessWithTimeout {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        $ArgumentList,
+        [int]$TimeoutSeconds = 1800,
+        [switch]$Hidden
+    )
+    $startArgs = @{ FilePath = $FilePath; ArgumentList = $ArgumentList; PassThru = $true; ErrorAction = 'Stop' }
+    if ($Hidden) { $startArgs['WindowStyle'] = 'Hidden' }
+    $proc   = Start-Process @startArgs
+    $exited = $proc.WaitForExit($TimeoutSeconds * 1000)
+    if (-not $exited) {
+        $proc.Kill()
+        Write-Log "'$FilePath' did not complete within ${TimeoutSeconds}s and was terminated." 'ERROR'
+        return -1
+    }
+    return $proc.ExitCode
+}
 
 # ─── PROXY / CONNECTIVITY / SERVICE CHECKS ────────────────────────────────────
 function Get-ProxyArgs {
@@ -179,8 +204,10 @@ function Install-DotNetDesktopRuntime {
         throw ".NET runtime installer failed Authenticode validation (status: $($sig.Status)) - refusing to run it"
     }
 
-    $proc = Start-Process -Wait -FilePath $path -ArgumentList '/install','/quiet','/norestart' -PassThru
-    if ($proc.ExitCode -notin @(0, 3010)) { throw ".NET runtime installer exited $($proc.ExitCode)" }
+    # 900s (15 min): a .NET Desktop Runtime install is a small, fast MSI-style
+    # install - well under this on any working machine.
+    $exitCode = Invoke-ProcessWithTimeout -FilePath $path -ArgumentList '/install','/quiet','/norestart' -TimeoutSeconds 900
+    if ($exitCode -notin @(0, 3010)) { throw ".NET runtime installer exited $exitCode" }
     Remove-Item $path -Force -ErrorAction SilentlyContinue
     Write-Log '.NET 8 Desktop Runtime installed via direct download' 'DEBUG'
 }
@@ -255,12 +282,14 @@ function Invoke-DCUScan {
     $reportPath = Join-Path $LogRoot 'scan-report.xml'
     Remove-Item $reportPath -Force -ErrorAction SilentlyContinue
 
-    $proc = Start-Process -FilePath $CliPath -ArgumentList '/scan',"-report=`"$reportPath`"" -Wait -PassThru -WindowStyle Hidden
-    Write-Log "DCU scan exit code $($proc.ExitCode)" 'DEBUG'
+    # 600s (10 min): a /scan just inventories installed vs. available
+    # updates - it doesn't download/apply anything, so it should be quick.
+    $exitCode = Invoke-ProcessWithTimeout -FilePath $CliPath -ArgumentList '/scan',"-report=`"$reportPath`"" -TimeoutSeconds 600 -Hidden
+    Write-Log "DCU scan exit code $exitCode" 'DEBUG'
     # Per Dell's dcu-cli reference, /scan returns 0 (no updates found) or 1
-    # (updates found) as normal outcomes, not failures - anything else is a
-    # real scan failure.
-    if ($proc.ExitCode -notin 0,1) { throw "dcu-cli /scan failed with exit code $($proc.ExitCode)" }
+    # (updates found) as normal outcomes, not failures - anything else
+    # (including -1, a timeout kill) is a real scan failure.
+    if ($exitCode -notin 0,1) { throw "dcu-cli /scan failed with exit code $exitCode" }
 
     $biosNeeded = $false
     if (Test-Path $reportPath) {
@@ -306,8 +335,10 @@ function Start-DCUUpdate {
     }
 
     Write-Log "Running: $CliPath $($updateArgs -join ' ')" 'DEBUG'
-    $proc = Start-Process -FilePath $CliPath -ArgumentList $updateArgs -Wait -PassThru -WindowStyle Hidden
-    return $proc.ExitCode
+    # 2700s (45 min): /applyUpdates can include a BIOS flash plus driver and
+    # firmware downloads/installs - legitimately the slowest step in this
+    # script, well beyond what a scan or the DCU installer itself needs.
+    return Invoke-ProcessWithTimeout -FilePath $CliPath -ArgumentList $updateArgs -TimeoutSeconds 2700 -Hidden
 }
 
 # ─── BATTERY UTILITIES ─────────────────────────────────────────────────────────
@@ -370,7 +401,10 @@ try {
     Test-DCUConnectivity
     Install-DotNetDesktopRuntime
     Get-DCUInstaller
-    Start-Process $InstallerPath -ArgumentList '/s',"-l=$LogRoot\install.log" -Wait
+    # 900s (15 min): the DCU application installer itself, same order of
+    # magnitude as the .NET runtime install above.
+    $installExit = Invoke-ProcessWithTimeout -FilePath $InstallerPath -ArgumentList '/s',"-l=$LogRoot\install.log" -TimeoutSeconds 900
+    if ($installExit -eq -1) { throw 'DCU installer did not complete within the timeout and was terminated.' }
     $cli  = Get-DCUCliPath
     $scan = Invoke-DCUScan $cli
 

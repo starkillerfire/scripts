@@ -15,6 +15,7 @@
     [switch]$AutoReboot,
     [int]   $RebootDelay       = 60,
     [switch]$PauseBetweenPhases,
+    [int]   $PhaseTimeoutSeconds = 120,
     [switch]$UpdateWinRE,
     [string]$ExportRecoveryUSB,
     [switch]$CheckForNewerBuildOnline,
@@ -161,11 +162,28 @@ function Invoke-Phase {
     New-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Force > $null
     Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -Value $Mask -Type DWord -Force
     Start-ScheduledTask -TaskPath '\Microsoft\Windows\PI\' -TaskName 'Secure-Boot-Update'
-    Start-Sleep 10
-    $ok = $true
-    foreach ($e in $Events) {
-        if (-not (Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Kernel-Boot/Operational';Id=$e;StartTime=$ScriptStart} -MaxEvents 1)) {
-            $ok = $false; Write-Log "Event $e missing." 'Warning'
+    # A flat Start-Sleep before checking for the completion events raced the
+    # task on slower/loaded hardware - the task hadn't finished yet, so the
+    # events genuinely weren't there, and the phase was marked failed for a
+    # reason that would have resolved moments later. Poll for up to
+    # $PhaseTimeoutSeconds instead of sleeping a fixed amount once.
+    $deadline = (Get-Date).AddSeconds($PhaseTimeoutSeconds)
+    $ok = $false
+    while ((Get-Date) -lt $deadline) {
+        $ok = $true
+        foreach ($e in $Events) {
+            if (-not (Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Kernel-Boot/Operational';Id=$e;StartTime=$ScriptStart} -MaxEvents 1 -ErrorAction SilentlyContinue)) {
+                $ok = $false
+            }
+        }
+        if ($ok) { break }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $ok) {
+        foreach ($e in $Events) {
+            if (-not (Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Kernel-Boot/Operational';Id=$e;StartTime=$ScriptStart} -MaxEvents 1 -ErrorAction SilentlyContinue)) {
+                Write-Log "Event $e missing after ${PhaseTimeoutSeconds}s." 'Warning'
+            }
         }
     }
     $Result.Value = $ok
@@ -179,15 +197,25 @@ if ($ExportRecoveryUSB) { Export-WinRE -Letter $ExportRecoveryUSB }
 # ── Run phases ────────────────────────────────────────────────────────────
 $P1=$P2=$P3=$P4=$false
 if (-not (Test-CA2023)) { Invoke-Phase 'Phase 1 - Add CA 2023'   0x40  @(1036)          ([ref]$P1) } else { $P1=$true }
-Invoke-Phase             'Phase 2 - New bootmgr'    0x100 @(1799)          ([ref]$P2)
-if ($P2) {
+
+# Back up the CURRENT (pre-patch) boot manager BEFORE Phase 2 installs the new
+# one. This used to run after Phase 2 had already returned, which captured
+# the file Phase 2 had already replaced - the "backup" preserved no way to
+# roll back to the original boot manager if the patch caused a boot problem,
+# defeating the entire purpose of $backupDir.
+if (-not $WhatIf) {
     $efi = Mount-Efi
-    $backupDir = [IO.Path]::Combine($env:SystemDrive,'EFI_Backup')
-    if (-not (Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory > $null }
-    Copy-Item (Join-Path $efi 'EFI\Microsoft\Boot\bootmgfw.efi') `
-              (Join-Path $backupDir ("bootmgfw_{0:yyyyMMdd_HHmmss}.efi" -f (Get-Date))) -Force
-    Dismount-Efi $efi
+    try {
+        $backupDir = [IO.Path]::Combine($env:SystemDrive,'EFI_Backup')
+        if (-not (Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory > $null }
+        Copy-Item (Join-Path $efi 'EFI\Microsoft\Boot\bootmgfw.efi') `
+                  (Join-Path $backupDir ("bootmgfw_{0:yyyyMMdd_HHmmss}.efi" -f (Get-Date))) -Force
+    } finally {
+        Dismount-Efi $efi
+    }
 }
+
+Invoke-Phase             'Phase 2 - New bootmgr'    0x100 @(1799)          ([ref]$P2)
 if (-not (Test-DBXGood)) { Invoke-Phase 'Phase 3 - Revoke PCA 2011' 0x180 @(1037,1801)     ([ref]$P3) } else { $P3=$true }
 Invoke-Phase             'Phase 4 - SVN lock-in'    0x280 @(1800,1796,1797,1798) ([ref]$P4)
 
@@ -198,15 +226,33 @@ Invoke-Phase             'Phase 4 - SVN lock-in'    0x280 @(1800,1796,1797,1798)
 # and actually re-enable BitLocker / clear the registry value for real.
 if ($WhatIf) {
     Write-Log 'WhatIf preview complete - no changes were made.'; $exit = 0
-} elseif ($P1 -and $P2 -and $P3 -and $P4) {
-    if ((Get-BitLockerVolume -MountPoint 'C:').ProtectionStatus -eq 'Off') {
-        manage-bde -protectors -enable C: > $null
-        Write-Log 'BitLocker protectors re-enabled.'
-    }
-    Remove-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -ea 0
-    Write-Log 'Mitigation complete.'; $exit = 0
 } else {
-    Write-Log 'Mitigation failed.' 'Error'; $exit = 1
+    # Re-enable BitLocker protectors regardless of whether every phase
+    # succeeded. This script requires protection to already be suspended
+    # before it starts (see the precondition check near the top) - previously
+    # protectors were only restored inside the all-four-phases-succeeded
+    # branch, so any single phase failure left the system drive unencrypted
+    # indefinitely with nothing in the log calling that out. The firmware/
+    # registry changes a phase makes are already done (or not) by this point
+    # regardless of $ok, so there's no reason restoring protection should
+    # depend on that outcome - a partial mitigation failure should be visible
+    # via $exit and the log, not by silently leaving BitLocker off.
+    try {
+        if ((Get-BitLockerVolume -MountPoint 'C:').ProtectionStatus -eq 'Off') {
+            manage-bde -protectors -enable C: > $null
+            Write-Log 'BitLocker protectors re-enabled.'
+        }
+    } catch {
+        Write-Log "FAILED to re-enable BitLocker protectors: $($_.Exception.Message) - MANUAL ACTION REQUIRED: run 'manage-bde -protectors -enable C:' on this machine." 'Error'
+    }
+
+    if ($P1 -and $P2 -and $P3 -and $P4) {
+        Remove-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -ea 0
+        Write-Log 'Mitigation complete.'; $exit = 0
+    } else {
+        Write-Log 'Mitigation failed - one or more phases did not complete. BitLocker protection has been restored regardless; rerun this script to retry the mitigation.' 'Error'
+        $exit = 1
+    }
 }
 
 Stop-Transcript

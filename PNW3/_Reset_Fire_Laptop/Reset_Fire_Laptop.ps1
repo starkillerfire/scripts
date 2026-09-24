@@ -868,6 +868,17 @@ function Test-OnRemovableMedia {
     catch { return $false }
 }
 $script:RunningFromRemovableMedia = Test-OnRemovableMedia -Path $PSScriptRoot
+if ($BackupPst -and -not $script:RunningFromRemovableMedia) {
+    # -BackupPst's only off-machine destination is the thumbdrive this script
+    # is itself run from (Move-ArtifactOffMachine, below) - run from anywhere
+    # else (a network share, a local copy, an RMM/Intune deployment) and
+    # there's nowhere for it to copy to, so it silently falls back to just
+    # deleting $PstBackupPath outright at the end of the run, identical to
+    # not having passed -BackupPst at all. Warn loudly up front, before any
+    # PST is even touched, rather than let that surprise the operator after
+    # the fact with no off-machine copy to show for it.
+    Write-Warning "-BackupPst was passed, but this script is not running from removable media - there is nowhere to copy PST backups off this machine to. PST backups WILL BE DELETED at the end of this run exactly as if -BackupPst had not been passed. Re-run from a thumbdrive for -BackupPst to actually preserve anything."
+}
 # Drive letter this script itself is running from - used by the drive-iterating
 # cleanup steps below (Recycle Bin, USN Journal, secure free-space wipe) to skip
 # the technician's own reusable thumbdrive when $RunningFromRemovableMedia is
@@ -952,6 +963,18 @@ function Move-ArtifactOffMachine {
         catch {
             Write-Host "  WARNING: could not copy $SourcePath to thumbdrive ($($_.Exception.Message)) - leaving it in place on the machine instead of deleting it with no off-machine copy." -ForegroundColor Yellow
         }
+    }
+
+    if (-not $script:RunningFromRemovableMedia) {
+        # No copy was ever attempted (this isn't the try/catch's $copyOk=$false-
+        # then-warn path above - that only fires on a FAILED copy attempt when
+        # running from removable media). This is the not-on-removable-media
+        # branch, where there's nowhere to copy to at all, so $SourcePath is
+        # about to be deleted with no off-machine copy ever having existed. Say
+        # so explicitly - this is the one line standing between an operator
+        # noticing a -BackupPst run preserved nothing, and finding out only
+        # after the previous user's PST is already gone.
+        Write-Warning "Deleting $SourcePath with no off-machine copy (not running from removable media)."
     }
 
     if ($copyOk) {
@@ -1667,7 +1690,11 @@ Function Clear-NetworkCredentials {
     if ($targets) {
         foreach ($target in $targets) {
             cmdkey /delete:"$target" | Out-Null
-            Write-Host "Removed credential: $target"
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Removed credential: $target"
+            } else {
+                Write-Warning "  Could not remove credential '$target' (cmdkey exit $LASTEXITCODE) - it may still be present in Credential Manager."
+            }
         }
     }
     else {
@@ -3176,7 +3203,22 @@ Function Clear-ShadowCopies {
     # encrypting, so EDR tooling (Defender for Endpoint, CrowdStrike, etc.)
     # can flag or block it even though it's legitimate here - this is a
     # real, Microsoft-acknowledged interaction, not a bug in this script.
-    Get-CimInstance Win32_ShadowCopy -ErrorAction SilentlyContinue | Remove-CimInstance -ErrorAction SilentlyContinue
+    # Verify what actually got removed rather than assuming success - this
+    # step is what makes every other deletion in this script forensically
+    # final, so silently no-oping while still reporting COMPLETE would be the
+    # worst place in the file for that to happen unnoticed.
+    $before = @(Get-CimInstance Win32_ShadowCopy -ErrorAction SilentlyContinue)
+    if ($before.Count -gt 0) {
+        $before | Remove-CimInstance -ErrorAction SilentlyContinue
+        $remaining = @(Get-CimInstance Win32_ShadowCopy -ErrorAction SilentlyContinue)
+        if ($remaining.Count -gt 0) {
+            Write-Warning "  $($remaining.Count) of $($before.Count) shadow copies could not be removed - EDR/AV tooling on this machine may be blocking Win32_ShadowCopy deletion (a known, legitimate interaction - see this function's .NOTES). Data deleted elsewhere in this run may still be recoverable from a remaining shadow copy."
+        } else {
+            Write-Host "  Removed $($before.Count) shadow copy/copies."
+        }
+    } else {
+        Write-Host "  No shadow copies found."
+    }
     Write-Host -ForegroundColor Yellow "Shadow Copy Cleanup - COMPLETE`r`n"
 }
 
@@ -3201,6 +3243,9 @@ Function Clear-UsnJournal {
     # again, so this is a no-risk reset, not a permanent disable.
     Get-TargetFileSystemDrives | ForEach-Object {
         fsutil usn deletejournal /D $_.Root.TrimEnd('\') 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "  Could not reset USN journal on $($_.Root) (fsutil exit $LASTEXITCODE)."
+        }
     }
     Write-Host -ForegroundColor Yellow "USN Journal Reset - COMPLETE`r`n"
 }
@@ -3331,6 +3376,9 @@ Function Invoke-SecureFreeSpaceWipe {
         $drive = $_.Root.TrimEnd('\')
         Write-Host "  Wiping free space on $drive ..."
         cipher /w:$drive | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "  Secure free-space wipe failed on $drive (cipher exit $LASTEXITCODE) - free space on this drive may still contain recoverable data from everything deleted in this run."
+        }
     }
     Write-Host -ForegroundColor Yellow "Secure Free-Space Wipe - COMPLETE`r`n"
 }
@@ -3818,3 +3866,14 @@ if ($script:shouldReboot) {
         Write-Error "Shutdown command failed with exit code $LASTEXITCODE"
     }
 }
+
+# $script:stepErrors is only ever surfaced in the console summary above -
+# nothing set a non-zero process exit code for a run that completed but had
+# step failures, so any RMM/Intune/SCCM wrapper gating on this script's exit
+# code could not tell a fully clean run from one where, e.g., PST backup or
+# certificate cleanup silently failed. The two early-exit branches earlier in
+# this script (computer-name mismatch, no tasks selected) already call `exit`
+# explicitly - this extends that same discipline to the normal completion
+# path.
+if ($script:stepErrors.Count -gt 0) { exit 1 }
+exit 0

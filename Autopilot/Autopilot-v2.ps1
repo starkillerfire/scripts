@@ -130,6 +130,17 @@ BEGIN {
     }
     catch {
         Write-Host "Warning: Could not configure DNS resolvers: $($_.Exception.Message)" -ForegroundColor Yellow
+        # Ensure this is always defined even if the try block threw before
+        # reaching its assignment above. The generated update script (see
+        # #region WindowsUpdate below) references $targetInterfaceIndexes
+        # inside a $(...) subexpression, which throws under StrictMode if the
+        # variable was never set - that would crash the whole script well
+        # after this point, long after this DNS step was meant to have failed
+        # softly. An empty array just means the DNS-restore step in the
+        # generated script iterates zero interfaces, which is a safe degrade.
+        if (-not (Test-Path variable:targetInterfaceIndexes)) {
+            $targetInterfaceIndexes = @()
+        }
     }
 
 #endregion ConfigureDNS
@@ -461,7 +472,25 @@ END {
             }
             catch {
                 $errorMessage = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($errorMessage.error -eq "authorization_pending") {
+                if ($null -eq $errorMessage) {
+                    # No parseable JSON error body means this wasn't an OAuth
+                    # error response at all - e.g. a transient network
+                    # blip/timeout on the request itself. Previously this fell
+                    # into the same branch as a real fatal OAuth error
+                    # (invalid_grant, expired_token, etc.) and aborted the
+                    # whole run; now it's treated as transient and the loop
+                    # keeps polling until $maxWait, same as authorization_pending.
+                    # This null-check must run before any ".error" access below -
+                    # under StrictMode, indexing a property off $null throws,
+                    # which previously aborted registration on the very first
+                    # transient network error instead of retrying.
+                    if (($elapsed - $lastStatusPrint) -ge 60) {
+                        $lastStatusPrint = $elapsed
+                        $remaining = $maxWait - $elapsed
+                        Write-Host "Transient error polling for token, retrying... ($remaining`s remaining): $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
+                elseif ($errorMessage.error -eq "authorization_pending") {
                     if (($elapsed - $lastStatusPrint) -ge 60) {
                         $lastStatusPrint = $elapsed
                         $remaining = $maxWait - $elapsed
@@ -471,22 +500,13 @@ END {
                 elseif ($errorMessage.error -eq "slow_down") {
                     $pollInterval += 5
                 }
-                elseif ($null -eq $errorMessage) {
-                    # No parseable JSON error body means this wasn't an OAuth
-                    # error response at all - e.g. a transient network
-                    # blip/timeout on the request itself. Previously this fell
-                    # into the same branch as a real fatal OAuth error
-                    # (invalid_grant, expired_token, etc.) and aborted the
-                    # whole run; now it's treated as transient and the loop
-                    # keeps polling until $maxWait, same as authorization_pending.
-                    if (($elapsed - $lastStatusPrint) -ge 60) {
-                        $lastStatusPrint = $elapsed
-                        $remaining = $maxWait - $elapsed
-                        Write-Host "Transient error polling for token, retrying... ($remaining`s remaining): $($_.Exception.Message)" -ForegroundColor Yellow
-                    }
-                }
                 else {
-                    Write-Host "Authentication error: $($errorMessage.error_description)" -ForegroundColor Red
+                    if ($errorMessage.PSObject.Properties['error_description']) {
+                        Write-Host "Authentication error: $($errorMessage.error_description)" -ForegroundColor Red
+                    }
+                    else {
+                        Write-Host "Authentication error: $($errorMessage.error)" -ForegroundColor Red
+                    }
                     return
                 }
             }

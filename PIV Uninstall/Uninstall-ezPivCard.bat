@@ -105,7 +105,16 @@ REM so it must be captured before any output or prompting.
 set EXITCODE=!errorlevel!
 if !EXITCODE! neq 0 echo [ERROR] Script exited with code !EXITCODE!
 
+REM Skip the pause for unattended/silent invocations (SCCM/Intune, or any
+REM caller passing -Silent through to the PS1) - there is no console under
+REM SYSTEM, so an unconditional pause here would hang until Intune's
+REM timeout marks an otherwise-successful run as failed.
+set "ARGS=%*"
+echo(!ARGS!| findstr /I /C:"-Silent" >nul
+if !errorlevel! equ 0 goto :SkipPause
+
 REM Keeps the window open so results are visible after this interactive run.
 pause
 
+:SkipPause
 exit /b !EXITCODE!

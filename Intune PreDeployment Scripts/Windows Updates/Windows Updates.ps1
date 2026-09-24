@@ -214,7 +214,8 @@ $consecutiveFailures = 0
 $maxConsecutiveFailures = 5
 while ($loop) {
     $installFailedThisPass = $false
-    $rawUpdates = Get-WindowsUpdate -MicrosoftUpdate -NotCategory 'Upgrades' -IgnoreReboot -AcceptAll -ErrorAction SilentlyContinue |
+    $scanErrors = $null
+    $rawUpdates = Get-WindowsUpdate -MicrosoftUpdate -NotCategory 'Upgrades' -IgnoreReboot -AcceptAll -ErrorAction SilentlyContinue -ErrorVariable scanErrors |
         Where-Object { $_.KBArticleIDs }
     $updates = $rawUpdates | Where-Object { -not ($_.KBArticleIDs | Where-Object { $_ -in $SkipKB }) }
     $excludedBySkipKB = $rawUpdates | Where-Object { $_.KBArticleIDs | Where-Object { $_ -in $SkipKB } }
@@ -229,6 +230,17 @@ while ($loop) {
 
     if ($updates) {
         try { Install-WindowsUpdate -Updates $updates -MicrosoftUpdate -AcceptAll -IgnoreReboot } catch { $script:HadErrors = $true; $installFailedThisPass = $true }
+    } elseif ($scanErrors) {
+        # A real scan failure (WSUS unreachable, PSWindowsUpdate internal
+        # error, transient COM failure) leaves $rawUpdates empty - identical
+        # to "nothing to install" - so without this check, a failed scan was
+        # silently reported as a clean, complete run (exit 0). Route it
+        # through the same consecutive-failure counter as a real install
+        # failure below instead of falling into the "$loop = $false" done
+        # path.
+        $script:HadErrors = $true
+        $installFailedThisPass = $true
+        foreach ($e in $scanErrors) { Write-Warning "Update scan failed: $($e.Exception.Message)" }
     } else {
         $loop = $false
     }

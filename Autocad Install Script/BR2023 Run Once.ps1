@@ -57,9 +57,16 @@ if ($PSBoundParameters.ContainsKey('ComputerName')) {
         } finally {
             Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
         }
-    } -ArgumentList $scriptText, $remoteParams -ErrorAction Continue
+    } -ArgumentList $scriptText, $remoteParams -ErrorAction Continue -ErrorVariable remoteErrors
 
-    return
+    # -ErrorAction Continue deliberately keeps going past one machine's
+    # failure, but the caller still needs a real pass/fail signal for the
+    # batch, so the collected errors decide this script's exit code.
+    if ($remoteErrors) {
+        Write-Warning "$($remoteErrors.Count) remote invocation error(s) across $($ComputerName -join ', ')."
+        exit 1
+    }
+    exit 0
 }
 
 ########################################################################
@@ -237,22 +244,30 @@ function Invoke-BrConfig {
 }
 
 function Remove-BrPayload {
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts - this runs from a scheduled task with no
+    # one at the console - while -WhatIf still works for testing.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([string]$LocalDst,[string]$LogRoot)
 
     # -ErrorAction SilentlyContinue used to mean cleanup failures (locked
     # file, permissions, etc.) vanished with no trace at all. -ErrorVariable
     # still captures them so real failures get logged, while "nothing there
     # to remove" (ObjectNotFound) stays quiet since that's the normal case.
-    Remove-Item $LocalDst -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable dstErr
-    $realDstErr = $dstErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
-    if ($realDstErr) {
-        Write-Log "WARNING: Failed to fully clean up '$LocalDst': $(($realDstErr.Exception.Message | Select-Object -Unique) -join '; ')"
+    if ($PSCmdlet.ShouldProcess($LocalDst, 'Recursively delete install tree')) {
+        Remove-Item $LocalDst -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable dstErr
+        $realDstErr = $dstErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
+        if ($realDstErr) {
+            Write-Log "WARNING: Failed to fully clean up '$LocalDst': $(($realDstErr.Exception.Message | Select-Object -Unique) -join '; ')"
+        }
     }
 
-    Remove-Item "$LogRoot\$Env:COMPUTERNAME*" -Force -ErrorAction SilentlyContinue -ErrorVariable logErr
-    $realLogErr = $logErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
-    if ($realLogErr) {
-        Write-Log "WARNING: Failed to remove old log files under '$LogRoot': $(($realLogErr.Exception.Message | Select-Object -Unique) -join '; ')"
+    if ($PSCmdlet.ShouldProcess("$LogRoot\$Env:COMPUTERNAME*", 'Delete old log files')) {
+        Remove-Item "$LogRoot\$Env:COMPUTERNAME*" -Force -ErrorAction SilentlyContinue -ErrorVariable logErr
+        $realLogErr = $logErr | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }
+        if ($realLogErr) {
+            Write-Log "WARNING: Failed to remove old log files under '$LogRoot': $(($realLogErr.Exception.Message | Select-Object -Unique) -join '; ')"
+        }
     }
 }
 
