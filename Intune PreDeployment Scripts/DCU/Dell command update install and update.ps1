@@ -14,7 +14,12 @@
 param(
     # Common
     [string]$ConfigPath    = 'C:\ProgramData\Dell\DCUScript.json',
-    [string]$InstallerPath = "$env:TEMP\DellCommandUpdate.exe",
+    # Per-run GUID subfolder under ProgramData, not a fixed, predictable
+    # %TEMP%\DellCommandUpdate.exe every SYSTEM-context user/process can see
+    # and write to ahead of the download. Its parent folder is created and
+    # ACL-locked to Administrators/SYSTEM below, before anything is written
+    # into it.
+    [string]$InstallerPath = (Join-Path $env:ProgramData "DOI-Staging\$([guid]::NewGuid())\DellCommandUpdate.exe"),
     [string]$LogRoot       = "$env:ProgramData\Dell\DCU-ScriptLogs",
     [ValidateRange(0,10000)][int]$BitsThrottleKBps = 0,
     [ValidateSet('All','BIOSOnly','DriversOnly')][string]$Mode = 'All',
@@ -53,7 +58,7 @@ $Version = '6.5.0'
 # Don't rely on the OS/.NET default protocol for the dl.dell.com /
 # downloads3.dell.com downloads below - freshly-imaged machines may not yet
 # default to TLS 1.2.
-if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
 if ($SelfHostPwsh7 -and $PSVersionTable.PSVersion.Major -lt 7) {
     if ($pwsh = Get-Command pwsh.exe -EA 0) { & $pwsh.Path -File $PSCommandPath @PSBoundParameters; exit $LASTEXITCODE }
@@ -84,9 +89,15 @@ if (-not (Test-Path $LogRoot)) { New-Item $LogRoot -ItemType Directory -Force | 
 $Transcript = Join-Path $LogRoot "Transcript_$((Get-Date).ToString('yyyyMMddHHmmss')).txt"
 Start-Transcript -Path $Transcript -EA 0 | Out-Null
 
+$installerDir = Split-Path -Parent $InstallerPath
+if ($installerDir -and -not (Test-Path $installerDir)) {
+    New-Item $installerDir -ItemType Directory -Force | Out-Null
+    icacls $installerDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'BUILTIN\Administrators:(OI)(CI)F' | Out-Null
+}
+
 # ─── LOGGING (debug only to PSFramework + local JSONL) ───────────────────────
 if (-not (Get-Module PSFramework -ListAvailable -EA 0)) {
-    Install-Module PSFramework -RequiredVersion 1.6.224 -Scope AllUsers -Force -EA 0
+    Install-Module PSFramework -RequiredVersion 1.6.224 -Repository PSGallery -Scope AllUsers -Force -EA 0
 }
 Import-Module PSFramework -EA 0
 # Install/Import above are both -EA 0 (offline machines with no PSGallery
@@ -309,7 +320,7 @@ function Invoke-DCUScan {
     }
 
     [pscustomobject]@{
-        ExitCode   = $proc.ExitCode
+        ExitCode   = $exitCode
         ReportPath = $reportPath
         BiosNeeded = $biosNeeded
     }
@@ -386,7 +397,7 @@ try {
     if ((Get-CimInstance Win32_ComputerSystem).Manufacturer -notmatch 'Dell'){
         Write-Log 'Non-Dell device - Windows Update fallback' 'WARN'
         if (-not (Get-Module PSWindowsUpdate -ListAvailable -EA 0)) {
-            Install-Module PSWindowsUpdate -Scope AllUsers -Force -EA Stop
+            Install-Module PSWindowsUpdate -RequiredVersion 2.2.0.3 -Repository PSGallery -Scope AllUsers -Force -EA Stop
         }
         Import-Module PSWindowsUpdate -EA Stop
         Install-WindowsUpdate -AcceptAll -AutoReboot:$false -EA Stop

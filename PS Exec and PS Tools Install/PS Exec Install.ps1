@@ -38,7 +38,11 @@ $ErrorActionPreference = 'Stop'
 # Enforce TLS 1.2 for the download
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$zipPath = Join-Path $env:TEMP 'PSTools.zip'
+# GUID-suffixed staging folder rather than a fixed %TEMP%\PSTools.zip path -
+# matches the pattern already used in ScanSnap Installer.ps1.
+$stagingDir = Join-Path $env:TEMP ([guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+$zipPath = Join-Path $stagingDir 'PSTools.zip'
 
 # --- Step 1: Download ---
 Write-Host "Downloading PSTools from Sysinternals..." -ForegroundColor Cyan
@@ -47,6 +51,7 @@ try {
     Write-Host "Download complete: $zipPath" -ForegroundColor Green
 } catch {
     Write-Error "Download failed: $($_.Exception.Message)"
+    Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
@@ -55,7 +60,7 @@ if ($ExpectedHash) {
     Write-Host "Verifying SHA-256 hash..." -ForegroundColor Cyan
     $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash
     if ($actual -ne $ExpectedHash.ToUpperInvariant()) {
-        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
         Write-Error "Hash mismatch! Expected: $ExpectedHash`n  Actual: $actual`nDownload aborted."
         exit 1
     }
@@ -74,7 +79,7 @@ try {
     Write-Error "Extraction failed: $($_.Exception.Message)"
     exit 1
 } finally {
-    Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --- Step 4: Verify the extracted binaries are actually signed by Microsoft ---

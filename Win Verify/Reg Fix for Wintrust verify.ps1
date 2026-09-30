@@ -50,6 +50,14 @@ $subKeyPaths = @(
 function Set-WinVerifyTrustLocal {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param()
+    # No blanket #Requires -RunAsAdministrator on this script - it would also
+    # gate the remote/-ComputerName and -CsvPath code path, which reaches
+    # target machines over the remote registry API and doesn't need the
+    # *local* process to be elevated. The check belongs here instead, right
+    # before the one code path that actually writes to the local HKLM.
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw "Administrator rights are required to modify HKLM on the local machine. Re-run this script from an elevated PowerShell prompt, or pass -ComputerName/-CsvPath to target remote machines instead."
+    }
     foreach ($subKey in $subKeyPaths) {
         if (-not $PSCmdlet.ShouldProcess("HKLM:\$subKey", "Set $keyName = $keyValue")) { continue }
         $psPath = "HKLM:\$subKey"

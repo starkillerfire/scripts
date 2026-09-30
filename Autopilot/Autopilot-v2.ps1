@@ -57,7 +57,9 @@ BEGIN {
     $tenantId = "0693b5ba-4b18-4d7b-9341-f32f400a5494"
 
     $executionRoot = (Get-Location).Path
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # Plain assignment would strip any other protocol already enabled on
+    # this machine (e.g. Tls13) - OR it in instead of replacing the whole set.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     if (-not (Test-Path -Path "C:\Temp")) {
         New-Item -Path "C:\Temp" -ItemType Directory -Force | Out-Null
@@ -123,10 +125,31 @@ BEGIN {
         $dnsBackup | Format-Table -AutoSize | Out-File -FilePath $dnsBackupPath -Force -ErrorAction SilentlyContinue
         Write-Verbose "Pre-existing DNS configuration backed up to $dnsBackupPath"
 
-        foreach ($ifIndex in $targetInterfaceIndexes) {
-            Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $publicDnsServers
+        # Only override with public resolvers if the org's own (DHCP-assigned)
+        # DNS servers can't actually resolve names. Forcing public DNS
+        # unconditionally would override a working split-horizon/internal-only
+        # resolver the network's proxy/auth infrastructure may depend on, even
+        # when it's functioning fine. Test resolution through whatever's
+        # already configured before touching anything.
+        $orgDnsWorks = $false
+        try {
+            $null = Resolve-DnsName -Name 'graph.microsoft.com' -ErrorAction Stop
+            $orgDnsWorks = $true
         }
-        Write-Verbose "Public DNS resolvers configured on interface index(es): $($targetInterfaceIndexes -join ', ')."
+        catch {
+            Write-Verbose "Resolution via the network's assigned DNS servers failed: $($_.Exception.Message)"
+        }
+
+        if ($orgDnsWorks) {
+            Write-Verbose "Existing DNS configuration resolves names successfully - leaving it as assigned (not overriding with public resolvers)."
+        }
+        else {
+            Write-Host "Warning: name resolution failed using this network's assigned DNS servers. Falling back to public DNS resolvers." -ForegroundColor Yellow
+            foreach ($ifIndex in $targetInterfaceIndexes) {
+                Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $publicDnsServers
+            }
+            Write-Verbose "Public DNS resolvers configured on interface index(es): $($targetInterfaceIndexes -join ', ')."
+        }
     }
     catch {
         Write-Host "Warning: Could not configure DNS resolvers: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -154,13 +177,12 @@ BEGIN {
     Write-Verbose "Microsoft Graph endpoint reachable."
 
 #region installDependencies
+    # PSGallery's trust setting is left as the administrator configured it on
+    # this machine - it used to be flipped to Trusted here persistently and
+    # machine-wide via Set-PSRepository. -Force on each individual
+    # Install-Script/Install-Module call below bypasses the untrusted-source
+    # confirmation prompt for just that call instead.
     $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-    try {
-        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
-    }
-    catch {
-        Write-Host "Warning: Could not set PSGallery as trusted: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
 
     if ($nugetProvider) {
         Write-Verbose "NuGet PackageProvider is already installed (Version: $($nugetProvider.Version))"
@@ -172,7 +194,7 @@ BEGIN {
             }
             else {
                 Write-Verbose "Installing Get-WindowsAutopilotInfo script..."
-                Install-Script -Name Get-WindowsAutopilotInfo -MinimumVersion 3.9 -Force -ErrorAction Stop
+                Install-Script -Name Get-WindowsAutopilotInfo -RequiredVersion 3.9 -Force -ErrorAction Stop
                 Write-Verbose "Get-WindowsAutopilotInfo script installed successfully." 
             }
 
@@ -181,7 +203,7 @@ BEGIN {
             }
             else {
                 Write-Verbose "Installing PSWindowsUpdate module..."
-                Install-Module -Name PSWindowsUpdate -MinimumVersion 2.2.0.3 -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+                Install-Module -Name PSWindowsUpdate -RequiredVersion 2.2.0.3 -Force -AllowClobber -Confirm:$false -ErrorAction Stop
                 Write-Verbose "PSWindowsUpdate module installed successfully."
             }
 
@@ -232,7 +254,7 @@ BEGIN {
                 }
                 else {
                     Write-Verbose "Installing Get-WindowsAutopilotInfo script..."
-                    Install-Script -Name Get-WindowsAutopilotInfo -MinimumVersion 3.9 -Force -ErrorAction Stop
+                    Install-Script -Name Get-WindowsAutopilotInfo -RequiredVersion 3.9 -Force -ErrorAction Stop
                     Write-Verbose "Get-WindowsAutopilotInfo script installed successfully."
                 }
 
@@ -241,7 +263,7 @@ BEGIN {
                 }
                 else {
                     Write-Verbose "Installing PSWindowsUpdate module..."
-                    Install-Module -Name PSWindowsUpdate -MinimumVersion 2.2.0.3 -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+                    Install-Module -Name PSWindowsUpdate -RequiredVersion 2.2.0.3 -Force -AllowClobber -Confirm:$false -ErrorAction Stop
                     Write-Verbose "PSWindowsUpdate module installed successfully."
                 }
 
@@ -311,13 +333,21 @@ Write-Host "reboot and rerun the .bat file from C:\Temp\RunWindowsUpdate.bat" -F
 Write-Host "==============================================="
 
 Write-Host "Restoring DHCP-assigned DNS configuration..." -ForegroundColor Yellow
+`$dnsRestoreFailed = `$false
 foreach (`$ifIndex in @($($targetInterfaceIndexes -join ','))) {
     try {
         Set-DnsClientServerAddress -InterfaceIndex `$ifIndex -ResetServerAddresses -ErrorAction Stop
     }
     catch {
+        `$dnsRestoreFailed = `$true
         Write-Host "Could not restore DNS on interface `$ifIndex : `$(`$_.Exception.Message)" -ForegroundColor Yellow
     }
+}
+if (`$dnsRestoreFailed) {
+    Write-Host "WARNING: DNS restore failed on one or more interfaces. Manual DNS remediation is needed on this machine." -ForegroundColor Red
+}
+else {
+    Write-Host "DNS configuration restored successfully." -ForegroundColor Green
 }
 
 Start-Sleep -Seconds 30

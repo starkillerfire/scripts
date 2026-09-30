@@ -100,13 +100,27 @@ function Get-RegExportPath ([string]$path) {
         -replace '^HKU:\\',  'HKU\'
 }
 
+# Returns $true on a confirmed-written backup, $false otherwise - callers
+# must not proceed to delete when this comes back $false. A cloud-side
+# printer display name can contain filesystem-illegal characters, so the
+# sanitizer strips the full illegal set (not just the ones this script's own
+# paths happened to produce), and the reg.exe exit code / file existence are
+# checked explicitly since reg.exe failures don't raise a terminating error.
 function Backup-RegKey ([string]$path) {
     try {
         $regPath    = Get-RegExportPath $path
-        $safeName   = ($regPath -replace '[\\:\{\}\s\(\)]', '_') -replace '_+', '_'
+        $safeName   = ($regPath -replace '[\\/:\{\}\s\(\)\|\*\?"<>]', '_') -replace '_+', '_'
         $backupFile = Join-Path $backupDir "$safeName.reg"
         $null = & reg.exe export $regPath $backupFile /y 2>&1
-    } catch { Write-Warn "Registry backup of '$path' failed: $($_.Exception.Message)" }  # Backup failure must never block removal
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $backupFile)) {
+            Write-Warn "Registry backup of '$path' failed: reg.exe export exited $LASTEXITCODE"
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Warn "Registry backup of '$path' failed: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -320,7 +334,11 @@ function Remove-RegKey {
     param([string]$path, [string]$label)
     if (Test-Path $path) {
         if (-not $PSCmdlet.ShouldProcess($label, "Remove registry key")) { return }
-        Backup-RegKey $path
+        if (-not (Backup-RegKey $path)) {
+            Write-Fail "Skipped key   : $label - backup failed, refusing to delete without a backup"
+            $failedItems.Add("RegKey: $label (skipped - backup failed)") | Out-Null
+            return
+        }
         try {
             Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
             Write-OK "Removed key  : $label"
@@ -336,7 +354,11 @@ function Remove-RegValue {
     [CmdletBinding(SupportsShouldProcess)]
     param([string]$keyPath, [string]$valueName)
     if (-not $PSCmdlet.ShouldProcess("$keyPath -> $valueName", "Remove registry value")) { return }
-    Backup-RegKey $keyPath
+    if (-not (Backup-RegKey $keyPath)) {
+        Write-Fail "Skipped value : $keyPath -> $valueName - backup failed, refusing to delete without a backup"
+        $failedItems.Add("RegValue: $keyPath\$valueName (skipped - backup failed)") | Out-Null
+        return
+    }
     try {
         Remove-ItemProperty -Path $keyPath -Name $valueName -Force -ErrorAction Stop
         Write-OK "Removed value: $keyPath -> $valueName"

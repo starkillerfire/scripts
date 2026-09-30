@@ -1,13 +1,62 @@
-﻿<# ======================================================================
-   SecureBoot-Mitigation_Win10.ps1  ·  v2025-06-18  ·  PowerShell 5.1
-   Mitigates CVE-2023-24932 (BlackLotus) on Windows 10 21H2 / 22H2
-   - Dynamic build gate           - Four Secure-Boot phases
-   - -UpdateWinRE locates WinRE and warns it must be patched manually
-     (this script does not apply the SafeOS DU itself) - Optional USB export of WinRE
-   - BitLocker protectors re-enabled after Phase 4
-   © Samual Carman CPN-CCAO
-   Version 1.3 - last updated 6/13. Find the latest version on GitHub
-====================================================================== #>
+﻿#Requires -Version 5.1
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Mitigates CVE-2023-24932 (BlackLotus) on Windows 10 21H2/22H2 via the four Secure-Boot servicing phases.
+
+.DESCRIPTION
+    SecureBoot-Mitigation_Win10.ps1 - v2025-06-18 - PowerShell 5.1
+
+    Gates on a dynamic build check, Secure Boot / pending-reboot state, and a BitLocker-suspended
+    precondition, then runs the four Secure-Boot phases via the built-in
+    \Microsoft\Windows\PI\Secure-Boot-Update scheduled task. The pre-patch boot manager is backed
+    up to $env:SystemDrive\EFI_Backup before Phase 2 replaces it, and old backups are pruned.
+    BitLocker protectors on C: are re-enabled once phase execution finishes, on every exit path
+    (success, partial failure, or an unhandled error caught by the script's trap) - not only the
+    all-phases-succeeded path.
+
+    -UpdateWinRE locates the WinRE directory and warns that its SafeOS Dynamic Update must still
+    be applied manually; this script does not apply it. -ExportRecoveryUSB optionally exports the
+    current WinRE image to a USB drive first.
+
+    (c) Samual Carman CPN-CCAO - Version 1.3
+
+.PARAMETER Silent
+    Suppress console (Write-Host) output. Logging to the event log and transcript still occurs.
+
+.PARAMETER WhatIf
+    Preview mode - reports what each phase would do without making any registry, scheduled-task,
+    or BitLocker changes.
+
+.PARAMETER AutoReboot
+    Automatically restart the computer after a successful mitigation, after waiting -RebootDelay
+    seconds.
+
+.PARAMETER RebootDelay
+    Seconds to wait before rebooting when -AutoReboot is specified. Default: 60.
+
+.PARAMETER PauseBetweenPhases
+    Pause for operator confirmation (Enter) after each phase completes. If BitLocker is still off
+    at that point, a warning is printed immediately before the prompt.
+
+.PARAMETER PhaseTimeoutSeconds
+    Seconds to wait for a phase's expected completion event(s) before marking it failed. Default: 120.
+
+.PARAMETER UpdateWinRE
+    Locate the WinRE directory and warn that its SafeOS Dynamic Update must be applied manually -
+    this switch does not apply the update itself.
+
+.PARAMETER ExportRecoveryUSB
+    Drive letter of a removable USB drive to export the current WinRE image to. If omitted while
+    this step is requested, the first removable drive >= 8 GB is used.
+
+.PARAMETER CheckForNewerBuildOnline
+    Additionally check support.microsoft.com for a fixed build number newer than the pinned
+    baseline, and use it if found. The online check can only raise the build gate, never lower it.
+
+.PARAMETER LogPath
+    Path to the transcript/log file. Default: $env:SystemDrive\Logs\CVE-2023-24932-Mitigation.log
+#>
 
 [CmdletBinding()] param(
     [switch]$Silent,
@@ -187,56 +236,31 @@ function Invoke-Phase {
         }
     }
     $Result.Value = $ok
-    if ($PauseBetweenPhases -and -not $Silent -and -not $WhatIf) { Read-Host 'ENTER to continue…' }
-}
-
-# ── Optional steps ────────────────────────────────────────────────────────
-if ($UpdateWinRE)       { Update-WinRE }
-if ($ExportRecoveryUSB) { Export-WinRE -Letter $ExportRecoveryUSB }
-
-# ── Run phases ────────────────────────────────────────────────────────────
-$P1=$P2=$P3=$P4=$false
-if (-not (Test-CA2023)) { Invoke-Phase 'Phase 1 - Add CA 2023'   0x40  @(1036)          ([ref]$P1) } else { $P1=$true }
-
-# Back up the CURRENT (pre-patch) boot manager BEFORE Phase 2 installs the new
-# one. This used to run after Phase 2 had already returned, which captured
-# the file Phase 2 had already replaced - the "backup" preserved no way to
-# roll back to the original boot manager if the patch caused a boot problem,
-# defeating the entire purpose of $backupDir.
-if (-not $WhatIf) {
-    $efi = Mount-Efi
-    try {
-        $backupDir = [IO.Path]::Combine($env:SystemDrive,'EFI_Backup')
-        if (-not (Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory > $null }
-        Copy-Item (Join-Path $efi 'EFI\Microsoft\Boot\bootmgfw.efi') `
-                  (Join-Path $backupDir ("bootmgfw_{0:yyyyMMdd_HHmmss}.efi" -f (Get-Date))) -Force
-    } finally {
-        Dismount-Efi $efi
+    if ($PauseBetweenPhases -and -not $Silent -and -not $WhatIf) {
+        # Read-Host blocks indefinitely with no timeout - if BitLocker is
+        # still off at this point (it is, until phase execution finishes),
+        # make that state impossible to miss for anyone who walks up to
+        # this prompt, not just whoever started the run.
+        if ((Get-BitLockerVolume -MountPoint 'C:').ProtectionStatus -eq 'Off') {
+            Write-Log 'WARNING: BitLocker protection is currently OFF on this machine and will not be restored until this script finishes running.' 'Warning'
+        }
+        Read-Host 'ENTER to continue…'
     }
 }
 
-Invoke-Phase             'Phase 2 - New bootmgr'    0x100 @(1799)          ([ref]$P2)
-if (-not (Test-DBXGood)) { Invoke-Phase 'Phase 3 - Revoke PCA 2011' 0x180 @(1037,1801)     ([ref]$P3) } else { $P3=$true }
-Invoke-Phase             'Phase 4 - SVN lock-in'    0x280 @(1800,1796,1797,1798) ([ref]$P4)
-
-# ── BitLocker re-enable & summary ─────────────────────────────────────────
-# $WhatIf is checked first and short-circuits before any real change here
-# (manage-bde, Remove-ItemProperty) - without this, a WhatIf run where every
-# phase reported "would succeed" would fall into the real-mitigation branch
-# and actually re-enable BitLocker / clear the registry value for real.
-if ($WhatIf) {
-    Write-Log 'WhatIf preview complete - no changes were made.'; $exit = 0
-} else {
-    # Re-enable BitLocker protectors regardless of whether every phase
-    # succeeded. This script requires protection to already be suspended
-    # before it starts (see the precondition check near the top) - previously
-    # protectors were only restored inside the all-four-phases-succeeded
-    # branch, so any single phase failure left the system drive unencrypted
-    # indefinitely with nothing in the log calling that out. The firmware/
-    # registry changes a phase makes are already done (or not) by this point
-    # regardless of $ok, so there's no reason restoring protection should
-    # depend on that outcome - a partial mitigation failure should be visible
-    # via $exit and the log, not by silently leaving BitLocker off.
+# ── BitLocker re-enable ───────────────────────────────────────────────────
+# The precondition check above guarantees BitLocker is off before phase
+# execution starts. It used to only be re-enabled in the normal-completion
+# branch below the phase calls - any unhandled exception during phase
+# execution went straight to the top-level trap and exited without ever
+# restoring it. $script:bitlockerReenableAttempted makes this idempotent so
+# it's safe to call from both the finally block below (which runs on every
+# exit path, including a normal completion) and it still only acts once.
+$script:bitlockerReenableAttempted = $false
+function Restore-BitLockerProtection {
+    if ($script:bitlockerReenableAttempted) { return }
+    $script:bitlockerReenableAttempted = $true
+    if ($WhatIf) { return }
     try {
         if ((Get-BitLockerVolume -MountPoint 'C:').ProtectionStatus -eq 'Off') {
             manage-bde -protectors -enable C: > $null
@@ -245,7 +269,65 @@ if ($WhatIf) {
     } catch {
         Write-Log "FAILED to re-enable BitLocker protectors: $($_.Exception.Message) - MANUAL ACTION REQUIRED: run 'manage-bde -protectors -enable C:' on this machine." 'Error'
     }
+}
 
+# ── Optional steps + Run phases ───────────────────────────────────────────
+# Wrapped in try/finally so Restore-BitLockerProtection runs on every exit
+# path out of this section - normal completion, or an unhandled exception
+# that propagates up to the top-level trap - not only the two spots that
+# used to call it explicitly.
+try {
+    if ($UpdateWinRE)       { Update-WinRE }
+    if ($ExportRecoveryUSB) { Export-WinRE -Letter $ExportRecoveryUSB }
+
+    $P1=$P2=$P3=$P4=$false
+    if (-not (Test-CA2023)) { Invoke-Phase 'Phase 1 - Add CA 2023'   0x40  @(1036)          ([ref]$P1) } else { $P1=$true }
+
+    # Back up the CURRENT (pre-patch) boot manager BEFORE Phase 2 installs the new
+    # one. This used to run after Phase 2 had already returned, which captured
+    # the file Phase 2 had already replaced - the "backup" preserved no way to
+    # roll back to the original boot manager if the patch caused a boot problem,
+    # defeating the entire purpose of $backupDir.
+    if (-not $WhatIf) {
+        $efi = Mount-Efi
+        try {
+            $backupDir = [IO.Path]::Combine($env:SystemDrive,'EFI_Backup')
+            if (-not (Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory > $null }
+            # Restrict the backup directory to admins - it holds a copy of
+            # the boot manager binary and shouldn't be world-readable.
+            icacls $backupDir /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' > $null
+            if ($LASTEXITCODE -ne 0) { Write-Log "Failed to set restrictive ACL on ${backupDir} (icacls exit $LASTEXITCODE)." 'Warning' }
+
+            Copy-Item (Join-Path $efi 'EFI\Microsoft\Boot\bootmgfw.efi') `
+                      (Join-Path $backupDir ("bootmgfw_{0:yyyyMMdd_HHmmss}.efi" -f (Get-Date))) -Force
+
+            # Backups accumulate on every run otherwise - prune anything
+            # older than 30 days, matching the retention window this repo
+            # already uses elsewhere (e.g. Invoke-FleetPatchSweep's $LogRetentionDays).
+            Get-ChildItem $backupDir -Filter 'bootmgfw_*.efi' -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        } finally {
+            Dismount-Efi $efi
+        }
+    }
+
+    Invoke-Phase             'Phase 2 - New bootmgr'    0x100 @(1799)          ([ref]$P2)
+    if (-not (Test-DBXGood)) { Invoke-Phase 'Phase 3 - Revoke PCA 2011' 0x180 @(1037,1801)     ([ref]$P3) } else { $P3=$true }
+    Invoke-Phase             'Phase 4 - SVN lock-in'    0x280 @(1800,1796,1797,1798) ([ref]$P4)
+} finally {
+    Restore-BitLockerProtection
+}
+
+# ── Summary ───────────────────────────────────────────────────────────────
+# $WhatIf is checked first and short-circuits before any real change here
+# (Remove-ItemProperty) - without this, a WhatIf run where every phase
+# reported "would succeed" would fall into the real-mitigation branch and
+# actually clear the registry value for real. BitLocker re-enable already
+# happened above regardless of $WhatIf/$ok - see Restore-BitLockerProtection.
+if ($WhatIf) {
+    Write-Log 'WhatIf preview complete - no changes were made.'; $exit = 0
+} else {
     if ($P1 -and $P2 -and $P3 -and $P4) {
         Remove-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -ea 0
         Write-Log 'Mitigation complete.'; $exit = 0

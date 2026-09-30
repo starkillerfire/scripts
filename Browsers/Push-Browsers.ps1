@@ -119,7 +119,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot '..\Intune PreDeployment Scripts\Common\BrowserDeploy.Common.psm1') -Force
 
-if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
 ################################################################################
 # Browser selection: explicit -Browser, or an interactive menu               #
@@ -161,6 +161,21 @@ $computers = [System.Collections.Generic.List[string]]::new()
 if ($ComputerName) { $computers.Add($ComputerName) }
 if ($CsvPath)      { (Import-Csv -Path $CsvPath).ComputerName | ForEach-Object { $computers.Add($_) } }
 if ($computers.Count -eq 0) { throw 'Provide -ComputerName or -CsvPath.' }
+
+# Refuse to push-install to the machine running this script - a self-
+# targeting entry (typo, stale CSV row, etc.) would run the install via
+# PsExec against localhost instead of a remote target.
+$selfTargetNames  = @('localhost', '127.0.0.1', '.')
+$remoteComputers  = [System.Collections.Generic.List[string]]::new()
+foreach ($c in $computers) {
+    if ($c -in $selfTargetNames -or $c -eq $env:COMPUTERNAME) {
+        Write-Warning "Skipping '$c' - self-targeting entries are not allowed."
+        continue
+    }
+    $remoteComputers.Add($c)
+}
+$computers = $remoteComputers
+if ($computers.Count -eq 0) { throw 'No remote targets remain after excluding self-targeting entries.' }
 
 # Safety valve: a -CsvPath that resolves to far more machines than intended
 # must not silently push-install to the whole list. Above -MaxTargets,
@@ -288,8 +303,18 @@ function Get-StagedInstaller {
     # additional shell commands. Known-good names are plain ASCII with
     # spaces (e.g. Firefox's "Firefox Setup 129.0.msi" from
     # Get-FirefoxLatestInfo), so the allowed set is deliberately narrow.
-    if ($msiName -notmatch '^[A-Za-z0-9 ._\-]+\.msi$') {
-        throw "Refusing to deploy $Name installer: filename '$msiName' contains characters outside the safe set (letters, digits, space, dot, underscore, hyphen, ending in .msi) - refusing to embed it in a remote command line."
+    # Windows treats the portion of a filename before its first '.' as the
+    # device name, regardless of what follows - "CON.msi" still resolves to
+    # the CON device, not a real file - so that leading segment is checked
+    # against the reserved list separately from the character-set check.
+    $reservedDeviceNames = @(
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+    )
+    $nameStem = ($msiName -split '\.')[0]
+    if ($msiName -notmatch '^[A-Za-z0-9 ._\-]+\.msi$' -or $nameStem -in $reservedDeviceNames) {
+        throw "Refusing to deploy $Name installer: filename '$msiName' contains characters outside the safe set (letters, digits, space, dot, underscore, hyphen, ending in .msi) or is a reserved Windows device name - refusing to embed it in a remote command line."
     }
 
     # Unconditional - independent of any hash check above (which silently

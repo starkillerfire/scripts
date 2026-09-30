@@ -69,6 +69,11 @@ function Write-UPLog([string]$Name,[string]$Id,[string]$Action,[string]$Status,[
   })
 }
 
+# PSGallery/NuGet reject TLS 1.0/1.1 - without forcing 1.2 here, a
+# freshly-imaged machine still defaulting to an older protocol would fail
+# every repository/module call below outright.
+if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
+
 # ---- Module & connect ----
 try {
   if (-not (Get-Module -ListAvailable -Name UniversalPrintManagement)) {
@@ -79,7 +84,7 @@ try {
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
       }
     } catch { Write-Warning "Could not verify/set PSGallery repository trust: $($_.Exception.Message)" }
-    Install-Module -Name UniversalPrintManagement -MinimumVersion 1.0.7 -Scope CurrentUser -Force
+    Install-Module -Name UniversalPrintManagement -RequiredVersion 1.0.7 -Scope CurrentUser -Force
   }
   Import-Module UniversalPrintManagement -ErrorAction Stop
 } catch {

@@ -16,6 +16,7 @@
 
 [CmdletBinding()]
 param(
+    [ValidatePattern('^https://')]
     [string]$SourceUrl  = 'https://origin.pfultd.com/downloads/ss/sshinst/w-2222/WinSSHOfflineInstaller_2_22_2.exe',
     [string]$WorkFolder = "$env:TEMP\ScanSnapHome_$([guid]::NewGuid().ToString('N'))",
     [switch]$KeepFiles
@@ -41,11 +42,14 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     # Rebuild from $PSBoundParameters so a non-default -SourceUrl/-KeepFiles
     # actually carries through to the elevated instance instead of silently
     # reverting to the built-in URL and always deleting the work folder.
-    $argList = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    # Passed as a real array, not a hand-quoted string - Start-Process quotes
+    # each element itself when building the child process's command line, so
+    # a value containing an embedded quote can't smuggle extra arguments in.
+    $argList = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
     foreach ($key in $PSBoundParameters.Keys) {
         $val = $PSBoundParameters[$key]
         if ($val -is [switch]) { if ($val.IsPresent) { $argList += "-$key" } }
-        else { $argList += "-$key", "`"$val`"" }
+        else { $argList += "-$key", $val }
     }
     $elevatedProc = Start-Process $elevatedExe -ArgumentList $argList -Verb RunAs -Wait -PassThru
     exit $elevatedProc.ExitCode
@@ -98,6 +102,16 @@ try {
         if (-not (Test-Path $issPath)) {
             Write-Warning "No ISS file for $($pkg.Name) - skipping"
             continue
+        }
+        # InstallShield's /f1 and /f2 switches require the path glued directly
+        # onto the switch (/f1"path") - that's a single argument to
+        # InstallShield's own parser, not something an array-based
+        # -ArgumentList can pass as separate elements. A literal " in either
+        # path would break out of that glued argument and corrupt/merge it
+        # with whatever follows, so refuse to build the command line rather
+        # than risk that.
+        foreach ($p in @($issPath, $logRoot)) {
+            if ($p -match '"') { throw "Path contains a double-quote character, which is not safe to embed in an InstallShield /f1 or /f2 argument: $p" }
         }
         $silentArgs = @('/s','/SMS',"/f1`"$issPath`"","/f2`"$logRoot`"")
         $proc = Start-Process $pkg.FullName -ArgumentList $silentArgs -WindowStyle Hidden -Wait -PassThru

@@ -9,6 +9,7 @@ param(
     [string]$ConfigPath = 'C:\ProgramData\UpdateAll\config.json',
     [string]$SelfUpdateSource = '',
     [string]$ExpectedSha256 = '',
+    [ValidateScript({$_ -match '^https://'})]
     [string]$LogEndpoint = '',
     [switch]$WingetCatchUp,
     [switch]$IgnoreBattery,
@@ -26,10 +27,21 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 # Set before the self-update download below (previously this only happened
 # later, after that download had already run unprotected).
-if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 $VerbosePreference = if ($EnableVerbose.IsPresent) { 'Continue' } else { 'SilentlyContinue' }
 $script:HadErrors = $false
 $script:Skipped = $false
+
+# Only these - the script's own parameters - may be set from config.json.
+# Set-Variable -Force below can create or overwrite ANY variable in this
+# scope by name, so without this allow-list a config file could just as
+# easily clobber an internal variable (e.g. $script:HadErrors, $freeGB) as
+# fill in a real parameter.
+$AllowedConfigKeys = @(
+    'LogDir', 'MinFreeGB', 'SkipKB', 'ForceKB', 'PatchWindow', 'ConfigPath',
+    'SelfUpdateSource', 'ExpectedSha256', 'LogEndpoint', 'WingetCatchUp',
+    'IgnoreBattery', 'EnableVerbose', 'NoImmediateReboot'
+)
 
 if (Test-Path $ConfigPath) {
     try {
@@ -43,6 +55,10 @@ if (Test-Path $ConfigPath) {
         # it did fire, it backwards-clobbered explicit CLI values with the
         # config defaults instead of filling in what was missing.
         foreach ($prop in $cfg.PSObject.Properties) {
+            if ($prop.Name -notin $AllowedConfigKeys) {
+                Write-Warning "Ignoring unrecognized config key '$($prop.Name)' in ${ConfigPath}"
+                continue
+            }
             if (-not $PSBoundParameters.ContainsKey($prop.Name)) { Set-Variable -Name $prop.Name -Value $prop.Value -Force }
         }
     } catch { Write-Warning "Failed to load config file ${ConfigPath}: $($_.Exception.Message)" }
@@ -111,9 +127,17 @@ if ($SelfUpdateSource) {
         $newHash = (Get-FileHash $tmp -Algorithm SHA256).Hash
         if ($newHash -ne $curHash) {
             $sig = Get-AuthenticodeSignature $tmp
-            if ($sig.Status -ne 'Valid') {
+            # Being validly signed isn't enough on its own - that only proves
+            # SOME publisher signed it, not that it's ours. Pin the subject too,
+            # or any validly-signed script (not just a legitimate update from
+            # this org) would pass. Placeholder pattern - no internal
+            # code-signing cert is established elsewhere in this repo yet;
+            # update this to match whatever this script is actually signed
+            # with once that's in place.
+            $selfUpdateSignerPattern = 'O=Bureau of Reclamation'
+            if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch [regex]::Escape($selfUpdateSignerPattern)) {
                 Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-                Stop-UpdateScript "Self-update package failed Authenticode validation (status: $($sig.Status)) - refusing to run it" 2
+                Stop-UpdateScript "Self-update package failed Authenticode validation (status: $($sig.Status); signer: $($sig.SignerCertificate.Subject)) - refusing to run it" 2
             }
             Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`""
             exit
@@ -162,7 +186,7 @@ Write-UpdateEvent 'Update-All start' ([System.Diagnostics.EventLogEntryType]::In
 $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;$env:PSModulePath"
 if (-not (Get-Module -ListAvailable PSWindowsUpdate)) {
     Install-PackageProvider NuGet -Force | Out-Null
-    Install-Module PSWindowsUpdate -MinimumVersion 2.2.0.3 -Force -Confirm:$false -Scope AllUsers
+    Install-Module PSWindowsUpdate -RequiredVersion 2.2.0.3 -Repository PSGallery -Force -Confirm:$false -Scope AllUsers
 }
 Import-Module PSWindowsUpdate -Force
 if (-not (Get-WUServiceManager | Where-Object ServiceID -eq '7971f918-a847-4430-9279-4a52d1efe18d')) {

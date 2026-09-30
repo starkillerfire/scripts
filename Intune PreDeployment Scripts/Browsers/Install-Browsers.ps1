@@ -82,7 +82,7 @@ Import-Module (Join-Path $PSScriptRoot '..\Common\BrowserDeploy.Common.psm1') -F
 # Setup: TLS, proxy auto-detect, disk-space guard                             #
 ################################################################################
 
-if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
 if (-not $Proxy) {
     try {

@@ -18,7 +18,7 @@
 param (
     [string]$ExpectedSha256  = '',             # optional official hash
     [string]$ExpectedVersion = '',             # optional min product version
-    [string]$TempPath        = (Join-Path ${env:TEMP} 'InfoPathInstall'),
+    [string]$TempPath        = (Join-Path ${env:TEMP} ('InfoPathInstall_' + [guid]::NewGuid().ToString('N'))),
     [string]$LogRoot         = 'C:\ProgramData\Logs\InfoPath',
     [switch]$Force
 )

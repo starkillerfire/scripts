@@ -1,13 +1,79 @@
-﻿<# =======================================================================
- Invoke-FleetPatchSweep.ps1
- -------------------------------------------------------------------------
- Enterprise patch sweep with MU-flip + WSUS rollback, retry logic,
- CIM sessions, offline catch-up task, central logging, and a
- local run-summary file. 100 % Windows PowerShell 5.1 compatible:
- • No JSON config
- • No Azure / Log Analytics
- • No PS 7 null-coalescing or ternary operators
- ======================================================================= #>
+﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Enterprise Windows Update sweep across a computer fleet with MU-flip + WSUS rollback,
+    retry logic, CIM/PSSession-based remoting, and central logging.
+
+.DESCRIPTION
+    Invoke-FleetPatchSweep.ps1
+
+    Resolves a target list (explicit names, a CSV, and/or an AD OU), rejects any resolved
+    name that doesn't look like a valid computer name, then rolls the fleet out in
+    -RingChunkSize-sized rings (ordered by AD OU where available) so a bad update doesn't
+    hit every machine at once. On each target: temporarily flips Windows Update to
+    Microsoft Update so it can pick up updates/drivers WSUS hasn't approved yet, scans and
+    installs, reboots (with a warned shutdown, not a silent forced one) if needed, then
+    rolls the WSUS/GPO-managed WindowsUpdate registry key back so WSUS keeps governing the
+    machine between sweeps. An offline catch-up scheduled task is registered on each node as
+    a safety net for updates that were missed or suppressed this run.
+
+    100% Windows PowerShell 5.1 compatible:
+    - No JSON config
+    - No Azure / Log Analytics
+    - No PS 7 null-coalescing or ternary operators
+
+.PARAMETER ComputerName
+    One or more explicit target computer names. Can be combined with -ComputerListCsv and/or -OU.
+
+.PARAMETER ComputerListCsv
+    Path to a CSV file with a "ComputerName" column. Can be combined with -ComputerName and/or -OU.
+
+.PARAMETER OU
+    Distinguished name of an Active Directory OU to search for computer objects. Can be
+    combined with -ComputerName and/or -ComputerListCsv.
+
+.PARAMETER SkipOffline
+    Skip targets that don't respond to a connectivity test instead of attempting (and failing)
+    a session to them.
+
+.PARAMETER NoDrivers
+    Exclude the Driver update category - only Software updates are scanned/installed.
+
+.PARAMETER NoFeatureUpgrades
+    Exclude Windows feature updates ("Feature update to Windows...") from the install set.
+
+.PARAMETER NoAutoReboot
+    Suppress the automatic post-update reboot. A node with updates pending stays pending
+    until the offline catch-up task runs or someone reboots it manually.
+
+.PARAMETER RingChunkSize
+    Maximum number of computers patched per ring/chunk. Must be at least 1 - a value of 0
+    or less would loop indefinitely when the target list is chunked. Default: 250.
+
+.PARAMETER ThrottleLimit
+    Throttle limit passed to New-PSSession / Invoke-Command for parallel remoting.
+
+.PARAMETER MaxRetry
+    Number of attempts per ring for computers that fail to complete. Default: 3.
+
+.PARAMETER MaxTargets
+    Safety valve: if the resolved target list (from -OU/-ComputerListCsv/-ComputerName combined)
+    exceeds this count, an explicit typed confirmation is required before the fleet loop starts,
+    so an -OU/-CSV that unexpectedly expands to a huge machine list can't silently patch-and-reboot
+    every match. Default: 50.
+
+.PARAMETER CentralLogShare
+    UNC path to copy each node's transcript/summary log to after it completes. Defaults to a
+    placeholder path - update it for this site. An unreachable share fails the whole run loudly
+    (via a Test-Path check) rather than silently skipping logging.
+
+.PARAMETER Credential
+    Admin credential to use for remoting to target machines. Takes precedence over -CMTarget.
+
+.PARAMETER CMTarget
+    Name of a credential stored in Windows Credential Manager to use instead of -Credential or
+    an interactive prompt.
+#>
 
 [CmdletBinding()]
 param(
@@ -21,6 +87,7 @@ param(
     [switch]      $NoDrivers,
     [switch]      $NoFeatureUpgrades,
     [switch]      $NoAutoReboot,
+    [ValidateRange(1,[int]::MaxValue)]
     [int]         $RingChunkSize       = 250,
     [int]         $ThrottleLimit,
     [int]         $MaxRetry            = 3,
@@ -96,6 +163,21 @@ function Get-Targets {
 
 $Targets = Get-Targets -Inline $ComputerName -CsvPath $ComputerListCsv -OUPath $OU -SkipOffline:$SkipOffline
 if (-not $Targets) { Write-Host "Nothing to do."; return }
+
+# ----- validate resolved target names before they're used anywhere else -----
+# $Targets feeds directly into session creation and per-node log file names
+# built from $s.ComputerName (e.g. the central-share copy further down) - an
+# unvalidated entry containing path-traversal segments (a bad CSV row, a
+# stray OU result, etc.) could escape $CentralLogShare when those paths are
+# built. Restrict to the character set a legitimate computer name can
+# actually contain and drop anything else before it reaches any of that.
+$validNamePattern = '^[A-Za-z0-9\-\.]{1,63}$'
+$invalidTargets = @($Targets | Where-Object { $_ -notmatch $validNamePattern })
+foreach ($bad in $invalidTargets) {
+    Write-Warning "Rejecting resolved target '$bad': does not match a valid computer name pattern ($validNamePattern)."
+}
+$Targets = @($Targets | Where-Object { $_ -match $validNamePattern })
+if (-not $Targets) { Write-Host "Nothing to do - no resolved targets passed name validation."; return }
 
 # ----- FIX 1: sanity check + explicit confirmation for large blast radius ----
 # An -OU/-CSV that resolves to far more machines than intended must not

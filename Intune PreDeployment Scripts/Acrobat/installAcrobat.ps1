@@ -8,7 +8,7 @@
 
 .NOTES
     • Tested on Windows 10/11 x64 - run from an elevated PowerShell session.
-    • Creates C:\Patches\Acrobat for temp work; cleans up when done.
+    • Creates a per-run GUID-named temp folder under ProgramData\DOI-Staging for temp work; cleans up when done.
     • Logs to C:\Patches\Logs\Acrobat-YYYY-MM-DD.log
     • Full transcript saved to C:\Patches\Logs\Acrobat-YYYY-MM-DD-transcript.log
 #>
@@ -29,7 +29,11 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
     $logPath         = Join-Path $logDir "$Software-$date.log"
     $transcriptPath  = Join-Path $logDir "$Software-$date-transcript.log"
     $acroPath        = Join-Path $env:ProgramFiles 'Adobe\Acrobat DC\Acrobat\Acrobat.exe'
-    $workDir         = Join-Path 'C:\Patches' $Software
+    # A GUID-named subfolder under ProgramData, not a fixed, predictable
+    # C:\Patches\Acrobat, so a local, non-admin process can't stage a file
+    # into this path ahead of time or race the download - it's locked down
+    # to Administrators/SYSTEM right after creation, below.
+    $workDir         = Join-Path (Join-Path $env:ProgramData 'DOI-Staging') ([guid]::NewGuid())
     $dirs            = @($logDir, $workDir)
     $needsPatch      = $false   # true only when manual base MSI path is taken
     $usedWinget      = $false
@@ -51,13 +55,13 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         Stop-Transcript -ErrorAction SilentlyContinue
     }
 
-    function Exit-Script ([int]$Code) {
+    function Stop-ScriptExecution ([int]$Code) {
         Invoke-Cleanup
         exit $Code
     }
 
     # Set whenever any install/patch step below returns 3010/1641, so the
-    # final Exit-Script call can actually report reboot-required instead of
+    # final Stop-ScriptExecution call can actually report reboot-required instead of
     # always hardcoding success (0) regardless of what happened.
     $script:RebootNeeded = $false
 
@@ -133,6 +137,9 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
     foreach ($d in $dirs) {
         if (!(Test-Path $d)) { New-Item $d -ItemType Directory -Force | Out-Null }
     }
+    # $workDir holds downloaded installers before their signature is
+    # verified - restrict it to Administrators/SYSTEM only.
+    icacls $workDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'BUILTIN\Administrators:(OI)(CI)F' | Out-Null
 
     Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContinue
 
@@ -140,7 +147,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
     trap {
         Write-Log "FATAL - Unhandled error: $_"
         Write-Log "  At: $($_.InvocationInfo.PositionMessage)"
-        Exit-Script 1
+        Stop-ScriptExecution 1
     }
 
     # Rotate logs older than 30 days to keep C:\Patches\Logs tidy
@@ -250,12 +257,12 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
             $vcFile = Join-Path $workDir 'vcredist_x64_2013.exe'
             Write-Log "Downloading VC++ 2013 x64..."
             try { Invoke-Download -Uri $vcUrl -OutFile $vcFile }
-            catch { Write-Log "ERROR downloading VC++ 2013: $_"; Exit-Script 1 }
+            catch { Write-Log "ERROR downloading VC++ 2013: $_"; Stop-ScriptExecution 1 }
 
             $vcSig = Get-AuthenticodeSignature -FilePath $vcFile
             if ($vcSig.Status -ne 'Valid' -or $vcSig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
                 Write-Log "ERROR - VC++ redistributable failed Authenticode validation (status: $($vcSig.Status)) - refusing to run it."
-                Exit-Script 1
+                Stop-ScriptExecution 1
             }
             Write-Log "Installing VC++ 2013 x64..."
             $vcExit = Invoke-Process -FilePath $vcFile -ArgumentList '/install /quiet /norestart' -TimeoutSeconds 300
@@ -305,37 +312,37 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
             }
 
             # Base zip is ~700 MB extracted to ~1.4 GB; require 1500 MB free before proceeding
-            if (!(Test-DiskSpace -Path $workDir -RequiredMB 1500)) { Exit-Script 1 }
+            if (!(Test-DiskSpace -Path $workDir -RequiredMB 1500)) { Stop-ScriptExecution 1 }
 
             $zipUrl  = 'https://ardownload3.adobe.com/pub/adobe/acrobat/win/AcrobatDC/Acrobat_Pro_x64_Web_WWMUI.zip'
             $zipFile = Join-Path $workDir 'Acrobat_Pro_x64_Web_WWMUI.zip'
             Write-Log "Downloading Acrobat 64-bit base media..."
             try { Invoke-Download -Uri $zipUrl -OutFile $zipFile }
-            catch { Write-Log "ERROR downloading Acrobat base media: $_"; Exit-Script 1 }
+            catch { Write-Log "ERROR downloading Acrobat base media: $_"; Stop-ScriptExecution 1 }
 
             Write-Log "Extracting base media..."
             try {
                 Expand-Archive -LiteralPath $zipFile -DestinationPath $workDir -Force -ErrorAction Stop
             } catch {
-                Write-Log "ERROR extracting base media: $_"; Exit-Script 1
+                Write-Log "ERROR extracting base media: $_"; Stop-ScriptExecution 1
             }
 
             $msi = Get-ChildItem $workDir -Recurse -Filter 'AcroPro.msi' | Select-Object -First 1
-            if (!$msi) { Write-Log "ERROR - AcroPro.msi not found after extraction."; Exit-Script 1 }
+            if (!$msi) { Write-Log "ERROR - AcroPro.msi not found after extraction."; Stop-ScriptExecution 1 }
 
             $msiSig = Get-AuthenticodeSignature -FilePath $msi.FullName
             if ($msiSig.Status -ne 'Valid' -or $msiSig.SignerCertificate.Subject -notmatch 'O=Adobe') {
                 Write-Log "ERROR - AcroPro.msi failed Authenticode validation (status: $($msiSig.Status)) - refusing to install it."
-                Exit-Script 1
+                Stop-ScriptExecution 1
             }
 
             Stop-AcrobatProcesses
             Write-Log "Installing Acrobat 64-bit base (silent)..."
             $msiExit = Invoke-Process -FilePath 'msiexec.exe' `
-                       -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /l*v `"$logPath`"" `
+                       -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart', '/l*v', $logPath) `
                        -TimeoutSeconds 1800
             if ($msiExit -notin @(0, 3010, 1641)) {
-                Write-Log "ERROR - Base install failed with exit code $msiExit."; Exit-Script 1
+                Write-Log "ERROR - Base install failed with exit code $msiExit."; Stop-ScriptExecution 1
             } elseif ($msiExit -in 3010, 1641) {
                 $script:RebootNeeded = $true
             }
@@ -353,11 +360,16 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
             $html = Invoke-WebRequest -Uri $relUrl -UseBasicParsing -ErrorAction Stop |
                     Select-Object -ExpandProperty Content
         } catch {
-            Write-Log "ERROR querying Adobe release notes: $_"; Exit-Script 1
+            Write-Log "ERROR querying Adobe release notes: $_"; Stop-ScriptExecution 1
         }
 
-        $m = [regex]::Matches($html, 'https://ardownload3\.adobe\.com[^"]+AcrobatDCx64Upd(?<ver>\d{10})\.msp')
-        if ($m.Count -eq 0) { Write-Log "No x64 MSP link found - aborting update."; Exit-Script 1 }
+        # The literal "/" right after "\.com" keeps this from matching a
+        # lookalike domain that merely starts with ardownload3.adobe.com,
+        # e.g. ardownload3.adobe.com.evil.example.com - without it, anything
+        # up to the next '"' would satisfy [^"]+ regardless of what comes
+        # right after the real domain.
+        $m = [regex]::Matches($html, 'https://ardownload3\.adobe\.com/[^"]+AcrobatDCx64Upd(?<ver>\d{10})\.msp')
+        if ($m.Count -eq 0) { Write-Log "No x64 MSP link found - aborting update."; Stop-ScriptExecution 1 }
 
         $latest  = $m | Sort-Object { $_.Groups['ver'].Value } -Descending | Select-Object -First 1
         $mspUrl  = $latest.Value
@@ -366,42 +378,38 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
 
         Write-Log "Latest patch identified: $mspVer - downloading..."
         try { Invoke-Download -Uri $mspUrl -OutFile $mspPath }
-        catch { Write-Log "ERROR downloading patch: $_"; Exit-Script 1 }
+        catch { Write-Log "ERROR downloading patch: $_"; Stop-ScriptExecution 1 }
 
-        # MSP patches aren't always Authenticode-signed by Adobe the way
-        # the base MSI is, so this can't hard-fail on "NotSigned" the way
-        # the checks above do without risking false failures on a
-        # legitimate patch. If a signature IS present, though, it must be
-        # valid and from Adobe - a present-but-invalid/wrong-publisher
-        # signature is a clear tamper signal worth stopping on.
+        # Same bar as the base MSI check above: valid signature AND Adobe as
+        # publisher, unconditionally. An unsigned patch used to get a
+        # warning-only pass, which meant a patch with no signature at all -
+        # tampered or not - always ran.
         $mspSig = Get-AuthenticodeSignature -FilePath $mspPath
-        if ($mspSig.Status -eq 'NotSigned') {
-            Write-Log "WARNING - MSP patch $mspVer has no Authenticode signature to verify. Proceeding, but consider validating this download out-of-band."
-        } elseif ($mspSig.Status -ne 'Valid' -or $mspSig.SignerCertificate.Subject -notmatch 'O=Adobe') {
+        if ($mspSig.Status -ne 'Valid' -or $mspSig.SignerCertificate.Subject -notmatch 'O=Adobe') {
             Write-Log "ERROR - MSP patch failed Authenticode validation (status: $($mspSig.Status)) - refusing to apply it."
-            Exit-Script 1
+            Stop-ScriptExecution 1
         }
 
         Write-Log "Applying patch $mspVer..."
         $patchExit = Invoke-Process -FilePath 'msiexec.exe' `
-                     -ArgumentList "/update `"$mspPath`" /qn /norestart /l*v `"$logPath`"" `
+                     -ArgumentList @('/update', $mspPath, '/qn', '/norestart', '/l*v', $logPath) `
                      -TimeoutSeconds 1800
         switch ($patchExit) {
             0       { Write-Log "Patch applied successfully." }
             3010    { Write-Log "Patch applied - reboot required (3010)."; $script:RebootNeeded = $true }
             1641    { Write-Log "Patch applied - installer initiated reboot (1641)."; $script:RebootNeeded = $true }
-            default { Write-Log "ERROR - Patch failed with exit code $patchExit."; Exit-Script 1 }
+            default { Write-Log "ERROR - Patch failed with exit code $patchExit."; Stop-ScriptExecution 1 }
         }
     }
 
     # Verify the executable is present before declaring success
     if (!(Test-Path $acroPath)) {
         Write-Log "ERROR - Deployment completed but Acrobat.exe not found. Installation may have failed."
-        Exit-Script 1
+        Stop-ScriptExecution 1
     }
 
     $method = if ($usedWinget) { 'winget' } else { 'manual' }
     Write-Log "Version after:  $(Get-AcrobatVersion)"
     Write-Log "Cleaning up temp files..."
     Write-Log "=== Deployment finished (via $method) on $env:COMPUTERNAME ==="
-    Exit-Script $(if ($script:RebootNeeded) { 3010 } else { 0 })
+    Stop-ScriptExecution $(if ($script:RebootNeeded) { 3010 } else { 0 })

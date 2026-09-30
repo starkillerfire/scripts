@@ -119,6 +119,17 @@ try {
     $script:hadFailure = $true
 }
 
+# Restrict the backup to admins - it's a full copy of the WMI repository
+# under System32 and shouldn't be left world-readable.
+cmd /c "icacls `"$backupPath`" /inheritance:r /grant:r `"Administrators:(OI)(CI)F`" `"SYSTEM:(OI)(CI)F`"" | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Log "Failed to set restrictive ACL on backup directory (icacls exit $LASTEXITCODE)." "WARN" }
+
+# Repository_Backup_* directories accumulate on every run otherwise - prune
+# anything older than 30 days.
+Get-ChildItem "$env:WINDIR\System32\wbem" -Directory -Filter 'Repository_Backup_*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
 # Attempt to salvage the repository first; only hard-reset if WMI still fails
 cmd /c "winmgmt /salvagerepository" | Out-Null
 Write-Log "WMI salvage attempted (exit $LASTEXITCODE)."
@@ -186,6 +197,11 @@ try {
 # that's the success on a retry or the final failure once attempts run out.
 function Invoke-RetryCommand {
     param([scriptblock]$Cmd, [int]$Max = 3, [int]$Delay = 5)
+    # Guards against a StrictMode crash on the final `return $result` if
+    # -Max is ever 0 or negative (no current caller does this, but nothing
+    # stops a future one) - the loop body would never run, leaving $result
+    # undefined instead of $null.
+    $result = $null
     for ($i = 1; $i -le $Max; $i++) {
         $result = & $Cmd
         if ($result -eq 0) { return $result }

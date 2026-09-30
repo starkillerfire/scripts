@@ -28,6 +28,11 @@
 
 .EXAMPLE
     .\ClearOldProfiles.ps1 -CsvPath C:\computers.csv -DaysInactive 60 -LogPath C:\Logs\profiles.log
+
+.NOTES
+    Console and -LogPath output includes user profile paths, which contain real usernames.
+    Treat log files produced by this script as PII-bearing and handle/retain them per your
+    organization's data-handling policy.
 #>
 # 'Medium' here matches the fix already applied to the nested
 # Clear-OldProfilesOnMachine function below (which is the one that actually

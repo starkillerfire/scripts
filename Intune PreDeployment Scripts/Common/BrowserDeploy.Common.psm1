@@ -19,7 +19,7 @@ Set-StrictMode -Version Latest
 # importing this module - Edge.ps1 currently does, but that made it a silent
 # footgun for any future caller (e.g. installChrome.ps1, if it's ever moved
 # onto this module) that doesn't.
-if ((([Net.ServicePointManager]::SecurityProtocol) -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol += 3072 }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
 # Cache which event sources have already been registered this process, so
 # Write-DeployLog doesn't re-check [Diagnostics.EventLog]::SourceExists on
@@ -275,8 +275,9 @@ function Get-EdgeLatestInfo {
     if (-not $rel) { throw "No Edge release found for Platform=Windows/Architecture=$arch." }
     $pkg = $rel.Artifacts | Where-Object { $_.Location -match '\.msi$' } | Select-Object -First 1
     if (-not $pkg) { throw 'No MSI artifact found for the latest Edge release.' }
+    $parsedVersion = try { [version]$rel.ProductVersion } catch { [version]'0.0.0.0' }
     $info = [pscustomobject]@{
-        Version  = [version]$rel.ProductVersion
+        Version  = $parsedVersion
         Sha256   = $pkg.Hash
         FileName = [IO.Path]::GetFileName($pkg.Location)
         Url      = $pkg.Location

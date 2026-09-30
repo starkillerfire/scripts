@@ -48,6 +48,10 @@ Generated: $(Get-Date -Format u)
 If Support wants more detail:
 - In Revu: Revu → Preferences (Ctrl+K) → Admin → ENABLE 'Extended Debugging', then reproduce the issue and re-run this script. (Revu may need a restart.)
 
+Before attaching this ZIP to an external/third-party support ticket, review its
+contents - it includes certificate subject/issuer details and other system
+information you may not want to share outside DOI.
+
 "@
 $readme | Set-Content (Join-Path $OutRoot "README.txt")
 

@@ -1,4 +1,21 @@
 ﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    New-image post-provisioning installs: Edge, Chrome, .NET Desktop Runtime
+    8.0.x, and Dell Command Update.
+
+.DESCRIPTION
+    Run once against a freshly imaged machine to lay down the baseline
+    software set before it's handed off. Each component tries winget first,
+    falling back to a direct vendor download (signature-verified before it's
+    ever run) when winget is unavailable or fails. Chrome/Edge delegate to
+    the shared ..\Browsers\Install-Browsers.ps1 rather than reimplementing
+    their own download/install logic here.
+
+.NOTES
+    Exit codes: 0 all components succeeded, 3010 all succeeded but one or
+    more need a reboot, 1 one or more components failed.
+#>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -8,6 +25,13 @@ $ProgressPreference = 'SilentlyContinue'   # speeds up Invoke-WebRequest downloa
 # of 3010 or 1641 (success, reboot required) is seen, so the final exit code
 # can reflect it instead of collapsing every non-hard-failure outcome to 0.
 $script:AnyRebootNeeded = $false
+
+# Per-run GUID subfolder under ProgramData for the .NET/DCU downloads below,
+# not the script's own folder (predictable, and OneDrive-synced besides) -
+# locked to Administrators/SYSTEM right after creation.
+$script:StagingDir = Join-Path $env:ProgramData "DOI-Staging\$([guid]::NewGuid())"
+New-Item -Path $script:StagingDir -ItemType Directory -Force | Out-Null
+icacls $script:StagingDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'BUILTIN\Administrators:(OI)(CI)F' | Out-Null
 
 function Test-DownloadedInstallerSignature {
     <#
@@ -72,7 +96,7 @@ function Install-DotNet {
     } catch {
         try {
             $uri  = "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.18/windowsdesktop-runtime-8.0.18-win-x64.exe"
-            $path = "$PSScriptRoot\windowsdesktop-runtime-8.0.18-win-x64.exe"
+            $path = Join-Path $script:StagingDir 'windowsdesktop-runtime-8.0.18-win-x64.exe'
             Invoke-WebRequest -Uri $uri -OutFile $path -UseBasicParsing -ErrorAction Stop
             Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Microsoft Corporation'
             $proc = Start-Process -Wait -FilePath $path -ArgumentList '/install','/quiet','/norestart' -PassThru
@@ -98,7 +122,7 @@ function Install-DCU {
         try {
             # NOTE: Update this URL when a new DCU version ships
             $uri  = "https://dl.dell.com/FOLDER13309588M/1/Dell-Command-Update-Windows-Universal-Application_C8JXV_WIN64_5.5.0_A00.EXE"
-            $path = "$PSScriptRoot\Dell-Command-Update_5.5.0.exe"
+            $path = Join-Path $script:StagingDir 'Dell-Command-Update_5.5.0.exe'
             Invoke-WebRequest -Uri $uri -OutFile $path -UseBasicParsing -ErrorAction Stop
             Test-DownloadedInstallerSignature -Path $path -ExpectedSignerPattern 'O=Dell'
             # /s = silent, /l = log path

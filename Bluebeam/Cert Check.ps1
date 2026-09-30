@@ -57,6 +57,20 @@ $zipPath  = Join-Path $desktop "TSA_CAPI2_Results_$stamp.zip"
 
 New-Item -ItemType Directory -Force -Path $outRoot,$tsaDir,$capiDir,$envDir | Out-Null
 
+# --- README with quick context -----------------------------------------------
+$readmeText = @"
+TSA / CAPI2 diagnostic bundle
+Generated: $(Get-Date -Format u)
+
+Contents: TSA chain verification output, CAPI2 revocation event logs, and an
+environment snapshot (installed Bluebeam entries, OS build).
+
+Before attaching this ZIP to an external/third-party support ticket, review its
+contents - it includes certificate subject/issuer details and other system
+information you may not want to share outside DOI.
+"@
+$readmeText | Set-Content -LiteralPath (Join-Path $outRoot "README.txt") -Encoding UTF8
+
 # --- Helper: run console tool and capture output ----------------------------
 function Invoke-ConsoleTool {
   [CmdletBinding(SupportsShouldProcess)]

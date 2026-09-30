@@ -99,7 +99,7 @@ function Write-Log {
     } catch { Write-Host "Failed to write to event log: $($_.Exception.Message)" }
 }
 
-function Assert-Admin {
+function Test-IsAdmin {
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
         Write-Log -Level 'Error' -Message 'Administrator privileges required.' -EventId 1003
@@ -107,7 +107,7 @@ function Assert-Admin {
     }
 }
 
-function Assert-64BitHost {
+function Test-Is64BitHost {
     # Only x86 is genuinely 32-bit; AMD64 and ARM64 are both legitimate
     # 64-bit host architectures. The previous '-ne AMD64' check would also
     # fire on native ARM64 Windows (where PROCESSOR_ARCHITECTURE is ARM64),
@@ -126,7 +126,20 @@ function Enable-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = 3072
 function Set-ProxyFromRegistry {
     $reg = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     $ps  = Get-ItemProperty -Path $reg -Name ProxyServer,ProxyEnable -ErrorAction SilentlyContinue
-    if ($ps.ProxyEnable -and $ps.ProxyServer) { $env:HTTPS_PROXY = "http://$($ps.ProxyServer)" }
+    if (-not ($ps.ProxyEnable -and $ps.ProxyServer)) { return }
+    $server = $ps.ProxyServer
+    # ProxyServer can be a single "host:port" applied to every protocol, or a
+    # protocol-specific list like "http=proxy1:80;https=proxy2:8080" - and in
+    # either form the value may already carry an explicit scheme. Use
+    # whatever's actually there instead of assuming http://.
+    if ($server -match '(?:^|;)\s*https=([^;]+)') {
+        $httpsServer = $Matches[1]
+        $env:HTTPS_PROXY = if ($httpsServer -match '^\w+://') { $httpsServer } else { "https://$httpsServer" }
+    } elseif ($server -match '^\w+://') {
+        $env:HTTPS_PROXY = $server
+    } else {
+        $env:HTTPS_PROXY = "http://$server"
+    }
 }
 
 function Test-FileHashMatch {
@@ -166,21 +179,15 @@ function Invoke-FallbackScript {
     }
 
     Write-Log -Level 'Information' -Message "Running fallback script: $Path $($ArgumentList -join ' ')"
-    $oldPol = Get-ExecutionPolicy -Scope Process
-    try {
-        Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
-        # -ErrorAction Stop here never actually caught a nonzero exit code -
-        # only a real launch failure (missing exe, etc.) throws a
-        # terminating error for an external process. A fallback script that
-        # legitimately failed (e.g. installAcrobat.ps1 exiting 1) fell
-        # straight through with no signal to the caller, which then always
-        # treated it as a success.
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Path @ArgumentList
-        if ($LASTEXITCODE -in 3010, 1641) { $script:AnyRebootNeeded = $true }
-        return ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -in 3010, 1641)
-    } finally {
-        Set-ExecutionPolicy -Scope Process -ExecutionPolicy $oldPol -Force
-    }
+    # -ErrorAction Stop here never actually caught a nonzero exit code -
+    # only a real launch failure (missing exe, etc.) throws a
+    # terminating error for an external process. A fallback script that
+    # legitimately failed (e.g. installAcrobat.ps1 exiting 1) fell
+    # straight through with no signal to the caller, which then always
+    # treated it as a success.
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Path @ArgumentList
+    if ($LASTEXITCODE -in 3010, 1641) { $script:AnyRebootNeeded = $true }
+    return ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -in 3010, 1641)
 }
 
 function Get-InstalledVersion {
@@ -213,10 +220,11 @@ function Install-DellCommandUpdate {
     # update install and update.ps1") - no dcu-cli.exe or *.msi lives in
     # this folder directly, so the previous binary-lookup logic here never
     # found anything to run. Invoke that script the same way the Windows
-    # Updates script is invoked below (execution-policy save/restore around
-    # a child powershell.exe -File call, then check $LASTEXITCODE - a
-    # nonzero external-process exit code doesn't throw a terminating error,
-    # so this can't rely on try/catch to detect failure).
+    # Updates script is invoked below (a child powershell.exe -File call,
+    # then check $LASTEXITCODE - a nonzero external-process exit code
+    # doesn't throw a terminating error, so this can't rely on try/catch to
+    # detect failure). Each child call passes its own -ExecutionPolicy
+    # Bypass, so there's nothing for this process's own policy to affect.
     #
     # IMPORTANT: the DCU script's own exit code (see its final `exit
     # ([int]$exitCode)`) is dcu-cli.exe's raw /applyUpdates exit code, Dell's
@@ -242,31 +250,25 @@ function Install-DellCommandUpdate {
         return @{ Status = 'Missing' }
     }
 
-    $oldPol = Get-ExecutionPolicy -Scope Process
-    try {
-        Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $dcuScript -NoReboot
-        switch ($LASTEXITCODE) {
-            0 {
-                Write-Log -Level 'Information' -Message 'DCU script completed successfully.'
-                return @{ Status = 'Installed/Updated'; Version = 'via-Script' }
-            }
-            1 {
-                Write-Log -Level 'Information' -Message 'DCU script completed successfully (reboot required).'
-                $script:AnyRebootNeeded = $true
-                return @{ Status = 'Installed/Updated'; Version = 'via-Script' }
-            }
-            500 {
-                Write-Log -Level 'Error' -Message 'DCU script failed internally; it has scheduled its own RunOnce retry for next boot.'
-                return @{ Status = 'Failed_WillRetryNextBoot' }
-            }
-            default {
-                Write-Log -Level 'Error' -Message "DCU script (dcu-cli) exited with code $LASTEXITCODE."
-                return @{ Status = "Failed_ExitCode_$LASTEXITCODE" }
-            }
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $dcuScript -NoReboot
+    switch ($LASTEXITCODE) {
+        0 {
+            Write-Log -Level 'Information' -Message 'DCU script completed successfully.'
+            return @{ Status = 'Installed/Updated'; Version = 'via-Script' }
         }
-    } finally {
-        Set-ExecutionPolicy -Scope Process -ExecutionPolicy $oldPol -Force
+        1 {
+            Write-Log -Level 'Information' -Message 'DCU script completed successfully (reboot required).'
+            $script:AnyRebootNeeded = $true
+            return @{ Status = 'Installed/Updated'; Version = 'via-Script' }
+        }
+        500 {
+            Write-Log -Level 'Error' -Message 'DCU script failed internally; it has scheduled its own RunOnce retry for next boot.'
+            return @{ Status = 'Failed_WillRetryNextBoot' }
+        }
+        default {
+            Write-Log -Level 'Error' -Message "DCU script (dcu-cli) exited with code $LASTEXITCODE."
+            return @{ Status = "Failed_ExitCode_$LASTEXITCODE" }
+        }
     }
 }
 
@@ -275,8 +277,8 @@ function Install-DellCommandUpdate {
 try {
     Initialize-Logging
     Write-Log -Level 'Information' -Message '=== MasterInstaller started ==='
-    Assert-Admin
-    Assert-64BitHost
+    Test-IsAdmin
+    Test-Is64BitHost
     Enable-Tls12
     Set-ProxyFromRegistry
 
@@ -334,8 +336,6 @@ try {
     if (Test-Path $wuScriptPath) {
         Write-Log -Level 'Information' -Message '=== Processing Windows Updates script ==='
         try {
-            $oldPol = Get-ExecutionPolicy -Scope Process
-            Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
             & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $wuScriptPath -NoImmediateReboot
             # A nonzero exit code from an external process does not throw a
             # terminating PowerShell error (even with -ErrorAction Stop), so
@@ -352,8 +352,6 @@ try {
         } catch {
             Write-Log -Level 'Error' -Message "Windows Updates script failed: $_"
             $summary['WindowsUpdates'] = @{ Status = 'Failed'; Error = "$_" }
-        } finally {
-            Set-ExecutionPolicy -Scope Process -ExecutionPolicy $oldPol -Force
         }
     } else {
         Write-Log -Level 'Information' -Message 'Windows Updates script not found - skipping.'

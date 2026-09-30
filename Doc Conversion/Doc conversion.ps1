@@ -82,6 +82,11 @@ try {
     # invisibly (since Visible = $false) and blocks forever with no session
     # to dismiss it - hanging the whole batch with no timeout.
     $word.DisplayAlerts = 0   # wdAlertsNone
+    # Force-disable macros (including AutoOpen) on every document this opens,
+    # regardless of whatever Trust Center policy happens to be set on the
+    # machine running this - these are untrusted legacy .doc/.docm files
+    # being fed to Documents.Open programmatically below.
+    $word.AutomationSecurity = 3   # msoAutomationSecurityForceDisable
 
     foreach ($file in $files) {
         $outBaseName = if ($duplicateBaseNames -contains $file.BaseName) { "$($file.BaseName)$($file.Extension)" } else { $file.BaseName }

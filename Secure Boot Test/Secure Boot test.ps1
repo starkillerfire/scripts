@@ -1,4 +1,29 @@
 ﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Checks and, on Dell hardware, remediates Secure Boot / UEFI CA 2023 servicing state
+    (CVE-2023-24932 / BlackLotus readiness).
+
+.DESCRIPTION
+    Snapshots the current Secure Boot / UEFI CA 2023 servicing state (registry markers, the
+    UEFI db variable, and recent TPM-WMI events), logs it, and then drives the built-in
+    \Microsoft\Windows\PI\Secure-Boot-Update scheduled task through its phases based on that
+    state. If Secure Boot itself is disabled on a Dell system, attempts to clear the Legacy
+    Option ROM blocker and enable Secure Boot in firmware first (via the Dell BIOS PowerShell
+    provider or cctk.exe). A reboot is required between several of these phases; this script
+    exits 3010 to signal that rather than rebooting on its own unless -ForceRestart is passed.
+
+.PARAMETER ForceRestart
+    Restart the computer automatically when a step in this script determines a reboot is
+    required. Uses a warned shutdown (5-minute window, on-screen message) rather than an
+    immediate forced restart. Without this switch, the script exits 3010 and leaves the
+    reboot to be scheduled separately.
+
+.PARAMETER SkipDellBiosChange
+    Do not attempt any Dell BIOS changes (Legacy Option ROM / Secure Boot enable) even if
+    Secure Boot is currently disabled on a Dell system. The script exits with an error in
+    that case instead, for environments that manage BIOS settings through another channel.
+#>
 [CmdletBinding()]
 param(
     [switch]$ForceRestart,
@@ -23,6 +48,17 @@ function Write-Log {
     $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Host $line
     Add-Content -Path $LogPath -Value $line
+}
+
+function Start-WarnedRestart {
+    # Restart-Computer -Force gives anyone logged on zero warning. Use the
+    # same shutdown.exe warning pattern as the rest of this script library
+    # (see Invoke-FleetPatchSweep.ps1) instead - a 5-minute window with an
+    # on-screen message - and log if the restart couldn't even be scheduled.
+    shutdown /r /t 300 /c "Secure Boot remediation requires a restart. This computer will restart in 5 minutes. Save your work now."
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log ("shutdown.exe failed to schedule the restart (exit {0})." -f $LASTEXITCODE) 'WARN'
+    }
 }
 
 function Test-IsAdmin {
@@ -519,7 +555,7 @@ if (-not $state.SecureBootEnabled) {
         Write-Log 'Dell BIOS change(s) were issued. A reboot is required before Windows can continue with the UEFI CA 2023 update.'
         if ($ForceRestart) {
             Write-Log 'ForceRestart specified. Restarting now.'
-            Restart-Computer -Force
+            Start-WarnedRestart
         }
         exit 3010
     }
@@ -552,7 +588,7 @@ if ($null -eq $state.AvailableUpdates -or $state.AvailableUpdates -eq 0) {
         Write-Log 'First update phase completed. Reboot is required before the second task run.'
         if ($ForceRestart) {
             Write-Log 'ForceRestart specified. Restarting now.'
-            Restart-Computer -Force
+            Start-WarnedRestart
         }
         exit 3010
     }
@@ -593,7 +629,7 @@ if ($state.AvailableUpdates -eq 0x4100) {
         Write-Log 'Second phase completed but the device still reports an in-progress state. Another reboot / normal boot cycle may be required.'
         if ($ForceRestart) {
             Write-Log 'ForceRestart specified. Restarting now.'
-            Restart-Computer -Force
+            Start-WarnedRestart
         }
         exit 3010
     }
@@ -634,7 +670,7 @@ if ($state.AvailableUpdates -eq 0x5944) {
         Write-Log 'Update phase completed after re-run. Reboot is required before the next phase.'
         if ($ForceRestart) {
             Write-Log 'ForceRestart specified. Restarting now.'
-            Restart-Computer -Force
+            Start-WarnedRestart
         }
         exit 3010
     }
@@ -648,7 +684,7 @@ if ($state.AvailableUpdates -eq 0x4000 -or $state.UEFICA2023Status -eq 'InProgre
     Write-Log 'Secure Boot update is already in progress / pending finalization. Review recent events and allow another reboot / normal boot cycle.'
     if ($ForceRestart) {
         Write-Log 'ForceRestart specified. Restarting now.'
-        Restart-Computer -Force
+        Start-WarnedRestart
     }
     exit 3010
 }
