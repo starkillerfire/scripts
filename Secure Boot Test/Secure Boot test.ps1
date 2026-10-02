@@ -55,9 +55,14 @@ function Start-WarnedRestart {
     # same shutdown.exe warning pattern as the rest of this script library
     # (see Invoke-FleetPatchSweep.ps1) instead - a 5-minute window with an
     # on-screen message - and log if the restart couldn't even be scheduled.
-    shutdown /r /t 300 /c "Secure Boot remediation requires a restart. This computer will restart in 5 minutes. Save your work now."
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log ("shutdown.exe failed to schedule the restart (exit {0})." -f $LASTEXITCODE) 'WARN'
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
+
+    if ($PSCmdlet.ShouldProcess('local computer', 'Schedule restart in 5 minutes via shutdown.exe')) {
+        shutdown /r /t 300 /c "Secure Boot remediation requires a restart. This computer will restart in 5 minutes. Save your work now."
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log ("shutdown.exe failed to schedule the restart (exit {0})." -f $LASTEXITCODE) 'WARN'
+        }
     }
 }
 
@@ -179,7 +184,7 @@ function Get-SecureBootSnapshot {
     }
 }
 
-function Get-SecureBootEvents {
+function Get-SecureBootEvent {
     try {
         $ids = 1032,1033,1034,1036,1037,1043,1044,1045,1795,1796,1797,1800,1801,1802,1803,1808
         $events = Get-WinEvent -FilterHashtable @{
@@ -198,7 +203,7 @@ function Get-SecureBootEvents {
 }
 
 function Write-SecureBootEventsToLog {
-    $events = Get-SecureBootEvents
+    $events = Get-SecureBootEvent
     if (-not $events -or $events.Count -eq 0) {
         Write-Log 'No recent TPM-WMI Secure Boot events found.'
         return
@@ -212,7 +217,7 @@ function Write-SecureBootEventsToLog {
 }
 
 function Get-LatestSecureBootEventId {
-    $events = Get-SecureBootEvents
+    $events = Get-SecureBootEvent
     if ($events -and $events.Count -gt 0) {
         return $events[0].Id
     }
@@ -441,13 +446,18 @@ function Get-SecureBootTask {
 }
 
 function Start-SecureBootTask {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
+
     $task = Get-SecureBootTask
     if (-not $task) {
         throw 'Scheduled task \Microsoft\Windows\PI\Secure-Boot-Update was not found.'
     }
 
-    Start-ScheduledTask -InputObject $task
-    Write-Log 'Started scheduled task: \Microsoft\Windows\PI\Secure-Boot-Update'
+    if ($PSCmdlet.ShouldProcess('\Microsoft\Windows\PI\Secure-Boot-Update', 'Start scheduled task')) {
+        Start-ScheduledTask -InputObject $task
+        Write-Log 'Started scheduled task: \Microsoft\Windows\PI\Secure-Boot-Update'
+    }
 }
 
 function Set-AvailableUpdates5944 {

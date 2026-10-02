@@ -135,7 +135,7 @@ else {
 }
 
 # =====  Build target list =====================================================
-function Get-Targets {
+function Get-Target {
     param(
         [string[]] $Inline,
         [string]   $CsvPath,
@@ -161,7 +161,7 @@ function Get-Targets {
     return ,$uniq
 }
 
-$Targets = Get-Targets -Inline $ComputerName -CsvPath $ComputerListCsv -OUPath $OU -SkipOffline:$SkipOffline
+$Targets = Get-Target -Inline $ComputerName -CsvPath $ComputerListCsv -OUPath $OU -SkipOffline:$SkipOffline
 if (-not $Targets) { Write-Host "Nothing to do."; return }
 
 # ----- validate resolved target names before they're used anywhere else -----

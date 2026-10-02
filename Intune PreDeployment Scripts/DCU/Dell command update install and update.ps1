@@ -143,7 +143,7 @@ function Invoke-ProcessWithTimeout {
 }
 
 # ─── PROXY / CONNECTIVITY / SERVICE CHECKS ────────────────────────────────────
-function Get-ProxyArgs {
+function Get-ProxyArg {
     # Returns a hashtable to splat onto Invoke-WebRequest/Start-BitsTransfer
     # calls so every download in this script honors -WebProxy/-ProxyCredential
     # consistently, instead of each call site reimplementing the same checks.
@@ -203,7 +203,7 @@ function Install-DotNetDesktopRuntime {
     # scripts, so all of them stay on the same runtime version.
     $uri  = if ($DotNetUrl) { $DotNetUrl } else { 'https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.18/windowsdesktop-runtime-8.0.18-win-x64.exe' }
     $path = Join-Path $env:TEMP 'windowsdesktop-runtime-8.0.18-win-x64.exe'
-    $proxyArgs = Get-ProxyArgs
+    $proxyArgs = Get-ProxyArg
     Invoke-WebRequest -Uri $uri -OutFile $path -UseBasicParsing @proxyArgs -ErrorAction Stop
 
     # Verify the fallback download is actually signed by Microsoft before
@@ -229,7 +229,7 @@ function Get-DCULatestUrl {
     # just documents intent. What this actually does is try the primary
     # Dell CDN URL first and fall back to the mirror only if the primary
     # doesn't respond, so a single dead link doesn't fail the whole run.
-    $proxyArgs = Get-ProxyArgs
+    $proxyArgs = Get-ProxyArg
     foreach ($candidate in @($DCUDownloadUrl, $MirrorUrl)) {
         if (-not $candidate) { continue }
         try {
@@ -255,7 +255,7 @@ function Get-DCUInstaller {
         Write-Log "Using already-downloaded installer at $InstallerPath" 'DEBUG'
     } else {
         $url = Get-DCULatestUrl
-        $proxyArgs = Get-ProxyArgs
+        $proxyArgs = Get-ProxyArg
         Write-Log "Downloading DCU installer from $url" 'INFO'
         if ($BitsThrottleKBps -gt 0) {
             Start-BitsTransfer -Source $url -Destination $InstallerPath -Priority Foreground @proxyArgs -ErrorAction Stop
@@ -327,6 +327,7 @@ function Invoke-DCUScan {
 }
 
 function Start-DCUUpdate {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory)][string]$CliPath,
         [Parameter(Mandatory)][bool]$IncludeBios
@@ -349,7 +350,9 @@ function Start-DCUUpdate {
     # 2700s (45 min): /applyUpdates can include a BIOS flash plus driver and
     # firmware downloads/installs - legitimately the slowest step in this
     # script, well beyond what a scan or the DCU installer itself needs.
-    return Invoke-ProcessWithTimeout -FilePath $CliPath -ArgumentList $updateArgs -TimeoutSeconds 2700 -Hidden
+    if ($PSCmdlet.ShouldProcess($CliPath, 'Apply Dell Command Update updates (/applyUpdates)')) {
+        return Invoke-ProcessWithTimeout -FilePath $CliPath -ArgumentList $updateArgs -TimeoutSeconds 2700 -Hidden
+    }
 }
 
 # ─── BATTERY UTILITIES ─────────────────────────────────────────────────────────

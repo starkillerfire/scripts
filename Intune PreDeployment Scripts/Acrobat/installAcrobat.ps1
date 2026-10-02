@@ -55,8 +55,12 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         Stop-Transcript -ErrorAction SilentlyContinue
     }
 
-    function Stop-ScriptExecution ([int]$Code) {
-        Invoke-Cleanup
+    function Stop-ScriptExecution {
+        [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
+        param([int]$Code)
+        if ($PSCmdlet.ShouldProcess($workDir, 'Clean up temp files and stop transcript')) {
+            Invoke-Cleanup
+        }
         exit $Code
     }
 
@@ -109,13 +113,17 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
         return $proc.ExitCode
     }
 
-    function Stop-AcrobatProcesses {
+    function Stop-AcrobatProcess {
+        [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+        param()
         $procs = Get-Process -Name 'Acrobat', 'AcroBroker', 'AcroRd32', 'AcroRd32Info' -ErrorAction SilentlyContinue
         if ($procs) {
-            Write-Log "Stopping running Acrobat processes to avoid file locks..."
-            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
-            # Wait up to 10s for actual termination rather than assuming a fixed sleep is enough
-            $procs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+            if ($PSCmdlet.ShouldProcess(($procs.Name -join ', '), 'Stop process')) {
+                Write-Log "Stopping running Acrobat processes to avoid file locks..."
+                $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+                # Wait up to 10s for actual termination rather than assuming a fixed sleep is enough
+                $procs | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -336,7 +344,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
                 Stop-ScriptExecution 1
             }
 
-            Stop-AcrobatProcesses
+            Stop-AcrobatProcess
             Write-Log "Installing Acrobat 64-bit base (silent)..."
             $msiExit = Invoke-Process -FilePath 'msiexec.exe' `
                        -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart', '/l*v', $logPath) `
@@ -352,7 +360,7 @@ $ProgressPreference = 'SilentlyContinue'   # suppress IWR progress bar; dramatic
 
     if ($needsPatch) {
         # ----------- locate and apply newest 64-bit MSP patch -----------
-        Stop-AcrobatProcesses
+        Stop-AcrobatProcess
 
         $relUrl = 'https://www.adobe.com/devnet-docs/acrobatetk/tools/ReleaseNotesDC/continuous/index.html'
         Write-Log "Querying Adobe release notes for latest x64 patch..."

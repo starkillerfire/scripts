@@ -196,7 +196,7 @@ function Get-DeepErrorNote {
 }
 
 # Wait until shares are really gone for a printer (eventual consistency)
-function Wait-UPNoShares {
+function Wait-UPNoShare {
   param(
     [Parameter(Mandatory)][string]$PrinterId,
     [int]$TimeoutSec = 20
@@ -275,7 +275,7 @@ function Test-UPHasProperty {
   param([object]$Object, [string]$Name)
   return ($null -ne $Object) -and ($Object.PSObject.Properties.Name -contains $Name)
 }
-function Get-AllUPPrinters {
+function Get-AllUPPrinter {
   $all=@(); $r=$null
   $r = Invoke-UP { Get-UPPrinter }
   if ((Test-UPHasProperty $r 'Results') -and $null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
@@ -286,7 +286,7 @@ function Get-AllUPPrinters {
   }
   $all
 }
-function Get-AllUPPrinterShares {
+function Get-AllUPPrinterShare {
   $all=@(); $r=$null
   $r = Invoke-UP { Get-UPPrinterShare }
   if ((Test-UPHasProperty $r 'Results') -and $null -ne $r.Results) { $all += $r.Results } elseif ($r) { $all += $r }
@@ -306,8 +306,8 @@ function Get-SharePrinterId {
   return $null
 }
 
-$allPrinters = Get-AllUPPrinters
-$allShares   = Get-AllUPPrinterShares
+$allPrinters = Get-AllUPPrinter
+$allShares   = Get-AllUPPrinterShare
 
 # Build map: printerId -> shares[]
 $sharesByPrinter = @{}
@@ -388,7 +388,7 @@ foreach ($p in $printersToDelete) {
 
   # After unshare, wait briefly until shares are truly gone
   if (-not $DryRun) {
-    $ready = Wait-UPNoShares -PrinterId $printerId -TimeoutSec 20
+    $ready = Wait-UPNoShare -PrinterId $printerId -TimeoutSec 20
     if (-not $ready) {
       Write-UPLog $printerName $printerId 'DeletePrinter' 'Error' 'Shares still present after timeout; delete skipped'
       continue

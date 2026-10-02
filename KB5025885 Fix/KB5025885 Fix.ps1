@@ -169,13 +169,18 @@ function Update-WinRE {
     # package for this exact build, whose download URL/KB varies by build
     # and isn't something to guess at here. Applying it is a manual step;
     # this function's job is only to point the operator at where to do it.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
+
     $info = reagentc /info 2>&1
     if ($LASTEXITCODE -ne 0 -or $info -match 'Disabled') { Write-Log 'WinRE disabled; SafeOS DU skipped.' 'Warning'; return }
     $loc  = ($info | Select-String 'WinRE location').Line
     if (-not $loc) { Write-Log 'Cannot locate WinRE.' 'Warning'; return }
     $winreDir = $loc.Split(':',2)[1].Trim()
-    Write-Log ("WinRE directory found: {0}" -f $winreDir)
-    Write-Log '-UpdateWinRE does not apply the SafeOS Dynamic Update automatically. WinRE boot components remain unpatched against this CVE until the matching SafeOS DU for this exact build is applied manually (mount the WinRE image with DISM /Mount-Image and apply the SafeOS DU package for this OS build, then DISM /Unmount-Image /Commit).' 'Warning'
+    if ($PSCmdlet.ShouldProcess($winreDir, 'Report WinRE location and required manual SafeOS Dynamic Update')) {
+        Write-Log ("WinRE directory found: {0}" -f $winreDir)
+        Write-Log '-UpdateWinRE does not apply the SafeOS Dynamic Update automatically. WinRE boot components remain unpatched against this CVE until the matching SafeOS DU for this exact build is applied manually (mount the WinRE image with DISM /Mount-Image and apply the SafeOS DU package for this OS build, then DISM /Unmount-Image /Commit).' 'Warning'
+    }
 }
 
 # ── Optional USB export of WinRE ───────────────────────────────────────────

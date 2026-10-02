@@ -191,7 +191,7 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$Force,
 
-    # Rename-BuiltInAccounts (renames the built-in Administrator/Guest
+    # Rename-BuiltInAccount (renames the built-in Administrator/Guest
     # accounts) and Invoke-BitLockerRemediation (rewrites BitLocker
     # protectors) are destructive and hard to reverse. Outside
     # -InteractiveMenu, this script normally pauses for an interactive
@@ -362,18 +362,24 @@ function Add-OutstandingItem {
 }
 
 function New-StigDirectory {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
-        New-Item -Path $Path -ItemType Directory -Force | Out-Null
+        if ($PSCmdlet.ShouldProcess($Path, 'Create directory')) {
+            New-Item -Path $Path -ItemType Directory -Force | Out-Null
+        }
     }
 }
 
 function Start-StigTranscript {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([Parameter(Mandatory)][string]$Path)
     if (-not $script:TranscriptActive) {
-        Start-Transcript -Path $Path -Append -Force | Out-Null
-        $script:TranscriptActive = $true
-        $script:TranscriptPath = $Path
+        if ($PSCmdlet.ShouldProcess($Path, 'Start transcript')) {
+            Start-Transcript -Path $Path -Append -Force | Out-Null
+            $script:TranscriptActive = $true
+            $script:TranscriptPath = $Path
+        }
     }
 }
 
@@ -421,6 +427,7 @@ function Invoke-NativeCommand {
 
 #region Registry Value & Per-User Registry Helpers
 function Set-StigRegistryValue {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Name,
@@ -430,24 +437,27 @@ function Set-StigRegistryValue {
         [Parameter(Mandatory)][object]$Value
     )
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-        New-Item -Path $Path -Force | Out-Null
-    }
+    if ($PSCmdlet.ShouldProcess("$Path\$Name", 'Set registry value')) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            New-Item -Path $Path -Force | Out-Null
+        }
 
-    if ($Type -eq 'MultiString') {
-        New-ItemProperty -Path $Path -Name $Name -PropertyType MultiString -Value ([string[]]$Value) -Force | Out-Null
-    }
-    else {
-        New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
+        if ($Type -eq 'MultiString') {
+            New-ItemProperty -Path $Path -Name $Name -PropertyType MultiString -Value ([string[]]$Value) -Force | Out-Null
+        }
+        else {
+            New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
+        }
     }
 }
 
 function Remove-StigRegistryValue {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Name
     )
-    if (Test-Path -LiteralPath $Path) {
+    if ((Test-Path -LiteralPath $Path) -and $PSCmdlet.ShouldProcess("$Path\$Name", 'Remove registry value')) {
         Remove-ItemProperty -Path $Path -Name $Name -Force -ErrorAction SilentlyContinue
     }
 }
@@ -576,7 +586,7 @@ function Test-SafeRegistryTarget {
     return $false
 }
 
-function Clear-OrphanedRegistryHives {
+function Clear-OrphanedRegistryHive {
     <#
     .SYNOPSIS
         Finds and force-unloads leftover HKU\TEMP_* hive mounts from a
@@ -639,6 +649,7 @@ function Backup-PerUserRegistryValue {
 }
 
 function Set-PerUserRegistryValue {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory)][string]$SubKey,
         [Parameter(Mandatory)][string]$Name,
@@ -661,7 +672,9 @@ function Set-PerUserRegistryValue {
 
         if (Test-Path -LiteralPath $loadedPath) {
             Backup-PerUserRegistryValue -RegExeHivePath "HKU\$sid\$SubKey" -SafeName "${sid}_$SubKey"
-            Set-StigRegistryValue -Path $targetPath -Name $Name -Type $Type -Value $Value
+            if ($PSCmdlet.ShouldProcess($targetPath, 'Set per-user registry value')) {
+                Set-StigRegistryValue -Path $targetPath -Name $Name -Type $Type -Value $Value
+            }
             continue
         }
 
@@ -679,7 +692,9 @@ function Set-PerUserRegistryValue {
             $loaded = $true
             Backup-PerUserRegistryValue -RegExeHivePath "HKU\$mountName\$SubKey" -SafeName "${sid}_$SubKey"
             $mountedTarget = "Registry::HKEY_USERS\$mountName\$SubKey"
-            Set-StigRegistryValue -Path $mountedTarget -Name $Name -Type $Type -Value $Value
+            if ($PSCmdlet.ShouldProcess($mountedTarget, 'Set per-user registry value')) {
+                Set-StigRegistryValue -Path $mountedTarget -Name $Name -Type $Type -Value $Value
+            }
         }
         finally {
             if ($loaded) {
@@ -704,7 +719,9 @@ function Set-PerUserRegistryValue {
             $loaded = $true
             Backup-PerUserRegistryValue -RegExeHivePath "HKU\$mountName\$SubKey" -SafeName "DEFAULT_$SubKey"
             $target = "Registry::HKEY_USERS\$mountName\$SubKey"
-            Set-StigRegistryValue -Path $target -Name $Name -Type $Type -Value $Value
+            if ($PSCmdlet.ShouldProcess($target, 'Set per-user registry value')) {
+                Set-StigRegistryValue -Path $target -Name $Name -Type $Type -Value $Value
+            }
         }
         finally {
             if ($loaded) {
@@ -728,11 +745,14 @@ function Disable-StigService {
 }
 
 function Start-StigServiceAuto {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([Parameter(Mandatory)][string]$Name)
     $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if (-not $svc) { return }
-    Set-Service -Name $Name -StartupType Automatic -ErrorAction SilentlyContinue
-    if ($svc.Status -ne 'Running') { Start-Service -Name $Name -ErrorAction SilentlyContinue }
+    if ($PSCmdlet.ShouldProcess($Name, 'Set service to automatic startup and start it')) {
+        Set-Service -Name $Name -StartupType Automatic -ErrorAction SilentlyContinue
+        if ($svc.Status -ne 'Running') { Start-Service -Name $Name -ErrorAction SilentlyContinue }
+    }
 }
 
 function Disable-StigOptionalFeature {
@@ -752,9 +772,11 @@ function Disable-StigOptionalFeature {
 }
 
 function Remove-StigWindowsCapability {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([Parameter(Mandatory)][string]$NamePattern)
     $capabilities = Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $NamePattern -and $_.State -eq 'Installed' }
     foreach ($capability in $capabilities) {
+        if (-not $PSCmdlet.ShouldProcess($capability.Name, 'Remove Windows capability')) { continue }
         try {
             Remove-WindowsCapability -Online -Name $capability.Name -ErrorAction Stop | Out-Null
             $script:RebootRequired = $true
@@ -766,6 +788,7 @@ function Remove-StigWindowsCapability {
 }
 
 function Set-AuditPolicy {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory)][string]$Subcategory,
         [Parameter(Mandatory)][bool]$Success,
@@ -773,7 +796,9 @@ function Set-AuditPolicy {
     )
     $successArg = if ($Success) { 'enable' } else { 'disable' }
     $failureArg = if ($Failure) { 'enable' } else { 'disable' }
-    Invoke-NativeCommand -FilePath auditpol.exe -ArgumentList @('/set', "/subcategory:$Subcategory", "/success:$successArg", "/failure:$failureArg") | Out-Null
+    if ($PSCmdlet.ShouldProcess($Subcategory, 'Set audit policy')) {
+        Invoke-NativeCommand -FilePath auditpol.exe -ArgumentList @('/set', "/subcategory:$Subcategory", "/success:$successArg", "/failure:$failureArg") | Out-Null
+    }
 }
 #endregion Service, Feature, Capability & Audit Policy Helpers
 
@@ -883,7 +908,7 @@ function Get-BuiltInLocalUserByRid {
     Get-LocalUser -ErrorAction SilentlyContinue | Where-Object { $_.SID.Value -match "-$Rid$" } | Select-Object -First 1
 }
 
-function Rename-BuiltInAccounts {
+function Rename-BuiltInAccount {
     Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction SilentlyContinue
 
     $admin = Get-BuiltInLocalUserByRid -Rid 500
@@ -1026,13 +1051,17 @@ function Invoke-BitLockerRemediation {
 }
 
 function Set-StigWindowsTime {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     $domainContext = Get-DomainContext
     Start-StigServiceAuto -Name 'W32Time'
 
     if ($domainContext.PartOfDomain) {
-        Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/config', '/syncfromflags:domhier', '/update') | Out-Null
-        Restart-Service -Name W32Time -Force -ErrorAction SilentlyContinue
-        Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/resync', '/force') -IgnoreExitCode | Out-Null
+        if ($PSCmdlet.ShouldProcess('W32Time', 'Configure time sync from domain hierarchy')) {
+            Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/config', '/syncfromflags:domhier', '/update') | Out-Null
+            Restart-Service -Name W32Time -Force -ErrorAction SilentlyContinue
+            Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/resync', '/force') -IgnoreExitCode | Out-Null
+        }
         return
     }
 
@@ -1041,9 +1070,11 @@ function Set-StigWindowsTime {
         return
     }
 
-    Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/config', "/manualpeerlist:$NtpServer", '/syncfromflags:manual', '/reliable:no', '/update') | Out-Null
-    Restart-Service -Name W32Time -Force -ErrorAction SilentlyContinue
-    Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/resync', '/force') -IgnoreExitCode | Out-Null
+    if ($PSCmdlet.ShouldProcess('W32Time', "Configure time sync from NTP server $NtpServer")) {
+        Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/config', "/manualpeerlist:$NtpServer", '/syncfromflags:manual', '/reliable:no', '/update') | Out-Null
+        Restart-Service -Name W32Time -Force -ErrorAction SilentlyContinue
+        Invoke-NativeCommand -FilePath w32tm.exe -ArgumentList @('/resync', '/force') -IgnoreExitCode | Out-Null
+    }
 }
 
 function Invoke-StigLapsPolicyProcessing {
@@ -1327,7 +1358,7 @@ function Invoke-LocalAdminGroupReview {
 #endregion System Readiness & Local Admin Review
 
 #region Reporting Helpers
-function Get-StigCertificateRequirements {
+function Get-StigCertificateRequirement {
     @(
         [pscustomobject]@{ StorePath='Cert:\LocalMachine\Root';       Thumbprint='D73CA91102A2204A36459ED32213B467D7CE97FB'; SubjectLike='DoD Root CA 3' },
         [pscustomobject]@{ StorePath='Cert:\LocalMachine\Root';       Thumbprint='B8269F25DBD937ECAFD4C35A9838571723F2D026'; SubjectLike='DoD Root CA 4' },
@@ -1350,7 +1381,7 @@ function Export-StigCertificateReport {
 
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $path = Join-Path $OutputRoot "Win11_STIG_CertificateReport_${Phase}_$stamp.csv"
-    $rows = foreach ($req in Get-StigCertificateRequirements) {
+    $rows = foreach ($req in Get-StigCertificateRequirement) {
         $thumb = ($req.Thumbprint -replace '\s','').ToUpperInvariant()
         $cert = Get-ChildItem -Path $req.StorePath -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1
         $candidate = $null
@@ -1395,7 +1426,7 @@ $script:StigRemoteManagementFirewallGroups = @(
     'Windows Management Instrumentation (WMI)'
 )
 
-function Get-StigRemoteManagementFirewallRules {
+function Get-StigRemoteManagementFirewallRule {
     Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -ErrorAction SilentlyContinue |
         Where-Object { $_.DisplayGroup -in $script:StigRemoteManagementFirewallGroups -or $_.Group -in $script:StigRemoteManagementFirewallGroups }
 }
@@ -1407,7 +1438,7 @@ function Export-FirewallScopePreview {
     $path = Join-Path $OutputRoot "Win11_STIG_FirewallScopePreview_$stamp.csv"
     $proposed = if ($AuthorizedRemoteManagementHosts) { ($AuthorizedRemoteManagementHosts -join ',') } else { '<none supplied>' }
     $rows = New-Object System.Collections.Generic.List[object]
-    foreach ($rule in @(Get-StigRemoteManagementFirewallRules)) {
+    foreach ($rule in @(Get-StigRemoteManagementFirewallRule)) {
         $currentAddress = '<unknown>'
         try {
             $addr = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
@@ -1435,9 +1466,12 @@ function Get-StigResumeMarkerPath {
 }
 
 function New-PostRebootValidationScript {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([Parameter(Mandatory)][string]$OutputRoot)
     if (-not $PSCommandPath) { return }
     $path = Join-Path $OutputRoot 'Resume-PostReboot-STIG-Validation.ps1'
+    if (-not $PSCmdlet.ShouldProcess($path, 'Create post-reboot validation script and resume marker')) { return }
+
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("`$ErrorActionPreference = 'Stop'") | Out-Null
     $cmd = @('&', ('"' + $PSCommandPath + '"'), '-ResumePostRebootValidation', '-NoReportPrompts')
@@ -1559,7 +1593,7 @@ function Copy-StigRunArtifactsToUsb {
     Write-Host "Reports/backups exported to: $dest" -ForegroundColor Green
 }
 
-function Invoke-EndOfRunReportActions {
+function Invoke-EndOfRunReportAction {
     if ($NoReportPrompts) { return }
 
     if ($OpenReportsAtEnd -or (Read-StigYesNo -Prompt 'Open the report folder now?' -DefaultYes $true)) {
@@ -2085,7 +2119,7 @@ function Convert-OvalValueForRegistry {
 #endregion SCAP/XCCDF XML Import & OVAL Interpretation
 
 #region SCAP-Driven Remediation
-function Get-ScapDrivenRegistryActions {
+function Get-ScapDrivenRegistryAction {
     $actions = New-Object System.Collections.Generic.List[object]
 
     foreach ($rule in $script:RuleInventory) {
@@ -2182,7 +2216,7 @@ function Invoke-ScapDrivenRegistryRemediation {
     if ($SkipScapDrivenRegistry) { return }
     Write-Section 'Applying SCAP-driven registry remediations from XML'
 
-    $actions = Get-ScapDrivenRegistryActions
+    $actions = Get-ScapDrivenRegistryAction
     $conflicts = @{}
     $grouped = $actions | Group-Object -Property { Get-ScapRegistryConflictKey -Hive $_.Hive -Key $_.Key -Name $_.Name }
     foreach ($group in $grouped) {
@@ -2220,7 +2254,7 @@ function Invoke-ScapDrivenRegistryRemediation {
     Write-Host "SCAP-driven registry actions applied: $applied" -ForegroundColor Green
 }
 
-function Get-ScapAuditActions {
+function Get-ScapAuditAction {
     $auditNameMap = @{
         credential_validation          = 'Credential Validation'
         security_group_management     = 'Security Group Management'
@@ -2298,7 +2332,7 @@ function Invoke-ScapDrivenAuditPolicy {
         Add-OutstandingItem "This OS's system locale ('$osLanguage') is not English - audit policy subcategory names in this script are hardcoded in English, and auditpol.exe matches on the localized display name, so these audit policy settings may silently fail to apply. Verify with 'auditpol /get /category:*' after this run and set any missing subcategories manually (auditpol supports /subcategory:{GUID} for locale-independent targeting)."
     }
 
-    $desired = Get-ScapAuditActions
+    $desired = Get-ScapAuditAction
     foreach ($subcategory in $desired.Keys) {
         try { Set-AuditPolicy -Subcategory $subcategory -Success $desired[$subcategory].Success -Failure $desired[$subcategory].Failure }
         catch { Add-OutstandingItem "Failed to set audit policy '$subcategory': $($_.Exception.Message)" }
@@ -2679,7 +2713,7 @@ function Invoke-FeatureAndServiceRemediation {
 function Invoke-CertificateRemediation {
     Write-Section 'Checking DoD/ECA certificate requirements'
     Export-StigCertificateReport -OutputRoot $ReportRoot -Phase 'BeforeImport'
-    foreach ($req in Get-StigCertificateRequirements) {
+    foreach ($req in Get-StigCertificateRequirement) {
         Import-StigCertificateIfMissing -StorePath $req.StorePath -Thumbprint $req.Thumbprint -SubjectLike $req.SubjectLike
     }
     Export-StigCertificateReport -OutputRoot $ReportRoot -Phase 'AfterImport'
@@ -2711,7 +2745,7 @@ function Invoke-FirewallScopeRemediation {
     }
 
     Write-Section 'Restricting inbound allow rules to authorized remote management hosts'
-    Get-StigRemoteManagementFirewallRules | ForEach-Object {
+    Get-StigRemoteManagementFirewallRule | ForEach-Object {
         try {
             Set-NetFirewallRule -Name $_.Name -RemoteAddress $AuthorizedRemoteManagementHosts -ErrorAction Stop
         }
@@ -2722,7 +2756,11 @@ function Invoke-FirewallScopeRemediation {
 
 #region Rule Targeting & Assessment-Result Helpers
 function New-RuleIdHashSet {
-    return (New-Object -TypeName 'System.Collections.Generic.HashSet[string]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase))
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
+    if ($PSCmdlet.ShouldProcess('rule ID set', 'Create in-memory hash set')) {
+        return (New-Object -TypeName 'System.Collections.Generic.HashSet[string]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase))
+    }
 }
 
 function Add-RuleIdToSet {
@@ -2863,7 +2901,7 @@ function Get-ScapAuditNameMap {
     }
 }
 
-function Get-ScapAuditRuleActions {
+function Get-ScapAuditRuleAction {
     $auditNameMap = Get-ScapAuditNameMap
     $actions = New-Object System.Collections.Generic.List[object]
     foreach ($rule in $script:RuleInventory) {
@@ -2899,8 +2937,8 @@ function Invoke-StigXmlValidation {
 
     Write-Section "$Phase against SCAP XML"
     $rows = New-Object System.Collections.Generic.List[object]
-    $registryActions = @(Get-ScapDrivenRegistryActions)
-    $auditActions = @(Get-ScapAuditRuleActions)
+    $registryActions = @(Get-ScapDrivenRegistryAction)
+    $auditActions = @(Get-ScapAuditRuleAction)
     $registryByRule = @{}
     $auditByRule = @{}
     if ($registryActions.Count -gt 0) { $registryByRule = $registryActions | Group-Object -Property RuleId -AsHashTable -AsString }
@@ -3043,7 +3081,7 @@ Start-StigTranscript -Path $script:TranscriptPath
 Write-Host "Computer: $env:COMPUTERNAME | Operator: $([Security.Principal.WindowsIdentity]::GetCurrent().Name) | Justification: $Justification" -ForegroundColor Cyan
 
 try {
-    Clear-OrphanedRegistryHives
+    Clear-OrphanedRegistryHive
 
     $menuSettings = Invoke-StigInteractiveMenu
     if ($menuSettings) {
@@ -3126,7 +3164,7 @@ try {
         Export-StigCertificateReport -OutputRoot $ReportRoot -Phase 'PostRebootValidation'
         Invoke-StigValidationSummary
         Write-StigOperatorSummary -OutputRoot $ReportRoot
-        Invoke-EndOfRunReportActions
+        Invoke-EndOfRunReportAction
         return
     }
 
@@ -3141,7 +3179,7 @@ try {
         Export-StigCertificateReport -OutputRoot $ReportRoot -Phase 'AnalyzeOnly'
         Invoke-StigValidationSummary
         Write-StigOperatorSummary -OutputRoot $ReportRoot
-        Invoke-EndOfRunReportActions
+        Invoke-EndOfRunReportAction
         return
     }
 
@@ -3151,7 +3189,7 @@ try {
         Write-Warning 'Rollback package only was selected. No remediation was performed.'
         Invoke-StigValidationSummary
         Write-StigOperatorSummary -OutputRoot $ReportRoot
-        Invoke-EndOfRunReportActions
+        Invoke-EndOfRunReportAction
         return
     }
 
@@ -3164,7 +3202,7 @@ try {
         Invoke-PowerStigBaseline
         Invoke-LocalSecurityPolicyRemediation
 
-        # Rename-BuiltInAccounts (renames the built-in Administrator/Guest
+        # Rename-BuiltInAccount (renames the built-in Administrator/Guest
         # accounts) and Invoke-BitLockerRemediation (rewrites BitLocker
         # protectors) are destructive and hard to reverse. -InteractiveMenu
         # already walks the operator through consenting to these up front;
@@ -3184,7 +3222,7 @@ try {
         # remaining remediation step below, including the BitLocker PIN
         # enablement and the post-reboot validation marker.
         if ($confirmedDestructiveChanges) {
-            try { Rename-BuiltInAccounts }
+            try { Rename-BuiltInAccount }
             catch { Add-OutstandingItem "Renaming built-in Administrator/Guest accounts failed: $($_.Exception.Message)" }
         }
         else {
@@ -3235,7 +3273,7 @@ try {
 
     Invoke-StigValidationSummary
     Write-StigOperatorSummary -OutputRoot $ReportRoot
-    Invoke-EndOfRunReportActions
+    Invoke-EndOfRunReportAction
     Write-Section 'Windows 11 STIG remediation complete'
     Write-Host "Transcript: $($script:TranscriptPath)" -ForegroundColor Green
     Write-Host "Backup path: $($script:BackupPath)" -ForegroundColor Green
@@ -3256,7 +3294,7 @@ catch {
 
     try { Invoke-StigValidationSummary } catch { Write-Host "Invoke-StigValidationSummary also failed while handling the fatal error above: $($_.Exception.Message)" -ForegroundColor Red }
     try { Write-StigOperatorSummary -OutputRoot $ReportRoot } catch { Write-Host "Write-StigOperatorSummary also failed while handling the fatal error above: $($_.Exception.Message)" -ForegroundColor Red }
-    try { Invoke-EndOfRunReportActions } catch { Write-Host "Invoke-EndOfRunReportActions also failed while handling the fatal error above: $($_.Exception.Message)" -ForegroundColor Red }
+    try { Invoke-EndOfRunReportAction } catch { Write-Host "Invoke-EndOfRunReportAction also failed while handling the fatal error above: $($_.Exception.Message)" -ForegroundColor Red }
 
     throw
 }

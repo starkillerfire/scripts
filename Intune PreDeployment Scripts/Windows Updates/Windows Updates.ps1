@@ -77,6 +77,7 @@ function Write-UpdateEvent {
 }
 
 function Stop-UpdateScript {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
     param([string]$m, [int]$code)
     if ($code -ne 0) { $script:HadErrors = $true }
     Write-Warning $m
@@ -86,14 +87,16 @@ function Stop-UpdateScript {
     # routine, expected outcome as an Application-log error.
     $type = if ($code -in 0, 3010) { [System.Diagnostics.EventLogEntryType]::Information } elseif ($code -eq 1) { [System.Diagnostics.EventLogEntryType]::Warning } else { [System.Diagnostics.EventLogEntryType]::Error }
     Write-UpdateEvent $m $type 6000
-    try { Stop-Transcript } catch { Write-Warning "Stop-Transcript failed: $($_.Exception.Message)" }
-    # The mutex is created with initiallyOwned:$false and this thread never
-    # calls WaitOne() to take ownership - it's only used as a system-wide
-    # "has an instance already started" check via $lockOK (createdNew).
-    # ReleaseMutex() requires the calling thread to actually own the mutex,
-    # so calling it here always threw. Dispose() just closes this process's
-    # handle to the named mutex and needs no ownership.
-    try { $script:Mutex.Dispose() } catch { Write-Warning "Mutex dispose failed: $($_.Exception.Message)" }
+    if ($PSCmdlet.ShouldProcess('transcript and Update-All mutex', 'Stop transcript and release mutex')) {
+        try { Stop-Transcript } catch { Write-Warning "Stop-Transcript failed: $($_.Exception.Message)" }
+        # The mutex is created with initiallyOwned:$false and this thread never
+        # calls WaitOne() to take ownership - it's only used as a system-wide
+        # "has an instance already started" check via $lockOK (createdNew).
+        # ReleaseMutex() requires the calling thread to actually own the mutex,
+        # so calling it here always threw. Dispose() just closes this process's
+        # handle to the named mutex and needs no ownership.
+        try { $script:Mutex.Dispose() } catch { Write-Warning "Mutex dispose failed: $($_.Exception.Message)" }
+    }
     exit $code
 }
 
@@ -204,7 +207,13 @@ function Register-Resume {
     $t = New-ScheduledTaskTrigger -AtStartup
     Register-ScheduledTask -TaskName 'ResumeUpdateAll' -TaskPath '\Temp\' -Action $a -Trigger $t -Force | Out-Null
 }
-function Remove-Resume { Unregister-ScheduledTask -TaskName 'ResumeUpdateAll' -TaskPath '\Temp\' -Confirm:$false -ErrorAction SilentlyContinue }
+function Remove-Resume {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
+    if ($PSCmdlet.ShouldProcess('ResumeUpdateAll', 'Unregister scheduled task')) {
+        Unregister-ScheduledTask -TaskName 'ResumeUpdateAll' -TaskPath '\Temp\' -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
 function Test-PendingReboot {
     # Registry-only fallback for when Get-WURebootStatus (PSWindowsUpdate) throws -
     # same checks used by Uninstall-ezPivCard.ps1 elsewhere in this repo.

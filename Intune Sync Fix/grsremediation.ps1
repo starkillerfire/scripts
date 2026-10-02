@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
     .OUTPUTS
     PSCustomObject representing the failed app states.
 #>
-function Get-FailedWin32AppStates {
+function Get-FailedWin32AppState {
     $win32AppsKeyPath = 'HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps'
     $appSubKeys = Get-ChildItem -Path $win32AppsKeyPath -Recurse -ErrorAction SilentlyContinue
 
@@ -103,7 +103,7 @@ function Get-LastHashValue {
     .PARAMETER lastHashValue
     The last hash value for the app.
 #>
-function Remove-FailedAppRegistryKeys {
+function Remove-FailedAppRegistryKey {
     # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
     # so ShouldProcess never prompts here - this remediation runs unattended
     # under Intune - while -WhatIf still works for testing.
@@ -267,7 +267,7 @@ try {
 
 try {
     # Get the failed Win32 app states
-    $failedStates = Get-FailedWin32AppStates
+    $failedStates = Get-FailedWin32AppState
 
     # Process each failed state
     foreach ($state in $failedStates) {
@@ -276,7 +276,7 @@ try {
             # Expected structure: ...\Win32Apps\<userObjId>\<appId>\... -
             # locate the Win32Apps segment and take the two after it, rather
             # than a hardcoded index. $state.SubKeyPath is $subKey.PSPath from
-            # Get-FailedWin32AppStates, a provider-qualified path (e.g.
+            # Get-FailedWin32AppState, a provider-qualified path (e.g.
             # "Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\...") -
             # a previous `-replace 'HKLM:\\', ''` here never actually matched
             # that format and was a silent no-op; the fixed-index [6]/[7]
@@ -310,9 +310,9 @@ try {
             $lastHashValue = Get-LastHashValue -userObjectId $userObjectId -appId $appId
 
             if ($lastHashValue) {
-                Remove-FailedAppRegistryKeys -userObjectId $userObjectId -appId $appId -lastHashValue $lastHashValue
+                Remove-FailedAppRegistryKey -userObjectId $userObjectId -appId $appId -lastHashValue $lastHashValue
             } else {
-                Remove-FailedAppRegistryKeys -userObjectId $userObjectId -appId $appId
+                Remove-FailedAppRegistryKey -userObjectId $userObjectId -appId $appId
             }
         } catch {
             Write-Warning "Error processing state for $($state.SubKeyPath): $($_.Exception.Message)"

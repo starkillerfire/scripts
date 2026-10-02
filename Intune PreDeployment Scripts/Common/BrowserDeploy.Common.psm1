@@ -38,12 +38,17 @@ function New-SingleInstanceLock {
         to use OpenOrCreate instead, which is less strict about excluding
         concurrent access.)
     #>
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
+    [OutputType([System.IO.FileStream])]
     param([Parameter(Mandatory)][string]$Path)
-    try {
-        return [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-    } catch {
-        return $null
+    if ($PSCmdlet.ShouldProcess($Path, 'Create exclusive lock file')) {
+        try {
+            return [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        } catch {
+            return $null
+        }
     }
+    return $null
 }
 
 function Close-SingleInstanceLock {

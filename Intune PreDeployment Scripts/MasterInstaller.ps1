@@ -124,6 +124,8 @@ function Test-Is64BitHost {
 function Enable-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = 3072 } catch { Write-Log -Level 'Warning' -Message "Failed to enable TLS 1.2: $($_.Exception.Message)" } }
 
 function Set-ProxyFromRegistry {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
+    param()
     $reg = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     $ps  = Get-ItemProperty -Path $reg -Name ProxyServer,ProxyEnable -ErrorAction SilentlyContinue
     if (-not ($ps.ProxyEnable -and $ps.ProxyServer)) { return }
@@ -134,11 +136,14 @@ function Set-ProxyFromRegistry {
     # whatever's actually there instead of assuming http://.
     if ($server -match '(?:^|;)\s*https=([^;]+)') {
         $httpsServer = $Matches[1]
-        $env:HTTPS_PROXY = if ($httpsServer -match '^\w+://') { $httpsServer } else { "https://$httpsServer" }
+        $proxyValue = if ($httpsServer -match '^\w+://') { $httpsServer } else { "https://$httpsServer" }
     } elseif ($server -match '^\w+://') {
-        $env:HTTPS_PROXY = $server
+        $proxyValue = $server
     } else {
-        $env:HTTPS_PROXY = "http://$server"
+        $proxyValue = "http://$server"
+    }
+    if ($PSCmdlet.ShouldProcess('HTTPS_PROXY environment variable', "Set to '$proxyValue' from registry proxy settings")) {
+        $env:HTTPS_PROXY = $proxyValue
     }
 }
 

@@ -30,7 +30,7 @@
 #   were running before the script stopped them (avoids re-enabling GPO-disabled services);
 #   RecentDocs registry key added to Clear-WindowsHistory; DNS cache flush step added;
 #   -SkipReboot switch added for log-review workflows; cmdkey current-user-only limitation
-#   documented in Clear-NetworkCredentials.
+#   documented in Clear-NetworkCredential.
 # Date: 13-May-2026 Version 2.6 - [CmdletBinding(SupportsShouldProcess)] enables -WhatIf
 #   dry-run mode; native commands guarded with $WhatIfPreference; transcript skipped in WhatIf
 #   mode; Read-Host prompt suppressed in WhatIf mode; hardcoded C:\ replaced with
@@ -38,7 +38,7 @@
 #   variable introduced; PSReadLine command history added to Clear-WindowsHistory; per-user
 #   thumbnail cache added to Clear-WindowsHistory; Teams meeting recordings added to
 #   Remove-TeamsProfile; Clear-WER step added for Windows Error Reporting data (per-user and
-#   system-wide); Clear-EventLogs now dynamically clears all non-empty logs via
+#   system-wide); Clear-DeviceEventLog now dynamically clears all non-empty logs via
 #   EventLogSession.ClearLog; .bat updated to forward %* so -SkipReboot/-WhatIf work from
 #   the launcher.
 # Date: 15-Aug-2026 Version 2.7 - Legacy EdgeHTML cleanup now covers all user profiles
@@ -67,7 +67,7 @@
 #   else in this script, that's real user files, not cache/app data, so it stays behind an
 #   explicit flag instead of running unconditionally.
 # Date: 15-Aug-2026 Version 2.13 - Personal file wipe (Desktop/Documents/Downloads/Pictures/
-#   Videos/Music) is no longer opt-in - -WipeUserFiles is removed and Remove-UserPersonalFiles
+#   Videos/Music) is no longer opt-in - -WipeUserFiles is removed and Remove-UserPersonalFile
 #   now always runs, same as every other step. The pre-run warning banner now unconditionally
 #   calls out that user files, not just cache/app data, are being deleted.
 # Date: 15-Aug-2026 Version 2.14 - Further deeper cleanup: USB/Bluetooth device history,
@@ -128,7 +128,7 @@
 #     is now the one source of truth for both the checklist and the run order. Falls back
 #     to running every task with the old text-prompt confirmation if WinForms can't load.
 #   - Reset-Personalization no longer touches wallpaper/theme at all (was resetting both to
-#     default); Remove-UserPersonalFiles now specifically preserves each user's current
+#     default); Remove-UserPersonalFile now specifically preserves each user's current
 #     desktop background picture file even when it lives inside Desktop/Pictures/etc, by
 #     stashing it outside the wipe target before deleting and restoring it to its original
 #     path afterward.
@@ -137,7 +137,7 @@
 #     Word/Excel/PowerPoint/Outlook/etc. prompt for sign-in again on next launch.
 # Date: 15-Aug-2026 Version 2.22 - Prefer official Microsoft-supported functions over manual
 #   registry/file manipulation where one actually exists for this use case:
-#   - Remove-OneDriveAccounts now runs OneDrive.exe /reset (Microsoft's own documented reset
+#   - Remove-OneDriveAccount now runs OneDrive.exe /reset (Microsoft's own documented reset
 #     command) for the current interactive session first; the existing registry-based removal
 #     stays as-is to cover every other profile, since /reset has no supported way to target a
 #     non-interactive user.
@@ -162,11 +162,11 @@
 #   steps already use the correct official command, and nothing else in this script has one).
 #   Confirmed via Get-Command that no function name other than the two already fixed in 2.22
 #   collides with a real cmdlet. Two concrete changes:
-#   - Clear-UserCertificates now clears Cert:\CurrentUser\My via the PowerShell Certificate
+#   - Clear-UserCertificate now clears Cert:\CurrentUser\My via the PowerShell Certificate
 #     provider (Remove-Item) as the preferred method for the current session, same
 #     current-session-only caveat as OneDrive.exe /reset - registry/file cleanup across all
 #     other profiles is unchanged and still does the real work fleet-wide.
-#   - Clear-EventLogs now documents why it uses EventLogSession.ClearLog (the .NET equivalent
+#   - Clear-DeviceEventLog now documents why it uses EventLogSession.ClearLog (the .NET equivalent
 #     of `wevtutil cl`) instead of the built-in Clear-EventLog cmdlet: Clear-EventLog only
 #     reaches classic Application/System/Security/Setup logs, not the modern "Applications and
 #     Services Logs" channels this step also clears.
@@ -176,13 +176,13 @@
 #   fsutil usn, Win32_ShadowCopy/Remove-CimInstance, Dism.exe /StartComponentCleanup, netsh
 #   winhttp) - all confirmed accurate as documented, no corrections needed. Two refinements
 #   from that pass:
-#   - Clear-UserCertificates now passes -DeleteKey to Remove-Item on Cert:\CurrentUser\My, so
+#   - Clear-UserCertificate now passes -DeleteKey to Remove-Item on Cert:\CurrentUser\My, so
 #     the Certificate provider itself removes the private key, not just the store entry -
 #     confirmed via Microsoft's own docs that -DeleteKey only needs delegated credentials for a
 #     REMOTE computer's store, and this always runs locally. (The Crypto\RSA/Crypto\Keys folder
 #     deletion below it is unchanged and still needed - it also catches orphaned key files with
 #     no matching store entry, which -DeleteKey wouldn't touch.)
-#   - Clear-ShadowCopies now notes that deleting Win32_ShadowCopy via WMI/CIM is the same
+#   - Clear-ShadowCopy now notes that deleting Win32_ShadowCopy via WMI/CIM is the same
 #     technique ransomware uses, so EDR tooling (Defender for Endpoint, CrowdStrike, etc.) may
 #     flag or block it on a managed machine - a real, Microsoft-acknowledged interaction, not a
 #     bug, so it's documented instead of being mistaken for one during troubleshooting.
@@ -201,7 +201,7 @@
 #     as the graceful official method - the existing stop-spooler-and-delete-files approach
 #     stays as the fallback, since a stuck/corrupted job can still be unremovable through the
 #     API while the spooler has its .SHD/.SPL files locked.
-#   - Clear-MappedDrives now runs Get-SmbMapping | Remove-SmbMapping -Force -UpdateProfile
+#   - Clear-MappedDrive now runs Get-SmbMapping | Remove-SmbMapping -Force -UpdateProfile
 #     first, for the current session (same current-session-only caveat as every other official-
 #     cmdlet swap here) - the per-hive registry cleanup is unchanged and still covers every
 #     other profile.
@@ -230,7 +230,7 @@
 # Date: 15-Aug-2026 Version 2.27 - Third Microsoft Learn pass. Two real swaps found and made,
 #   both confirmed against Microsoft Learn: the 'Flush Network Caches' task previously ran three
 #   inline native commands (ipconfig /flushdns, arp -d *, nbtstat -R) - promoted to a new
-#   documented function, Clear-NetworkCaches, which now uses Clear-DnsClientCache (DnsClient
+#   documented function, Clear-NetworkCache, which now uses Clear-DnsClientCache (DnsClient
 #   module) in place of ipconfig /flushdns and Get-NetNeighbor | Remove-NetNeighbor -Confirm:$false
 #   (NetTCPIP module) in place of arp -d *. nbtstat -R is unchanged - no PowerShell cmdlet
 #   equivalent exists for the NetBIOS name cache. Also checked and ruled out two more candidates:
@@ -281,14 +281,14 @@
 #   New Teams (already covered), classic Office apps (still Win32/Click-to-Run, not UWP), and
 #   OneDrive (still a classic Win32 exe, no UWP variant on desktop) were all confirmed NOT to have
 #   this same class of gap.
-# Date: 15-Aug-2026 Version 2.30 - Critical bug fix: Remove-UserPersonalFiles (the personal-file
+# Date: 15-Aug-2026 Version 2.30 - Critical bug fix: Remove-UserPersonalFile (the personal-file
 #   wipe - this script's whole reason for existing) and Remove-OutlookProfile's PST search both
 #   assumed Desktop/Documents/Pictures always live at "<profile>\Desktop" etc. Confirmed by
 #   inspecting this machine's own registry that this is FALSE whenever OneDrive Known Folder Move
 #   (KFM) is active - a standard enterprise M365 configuration: this machine's classic Desktop and
 #   Pictures folders don't exist AT ALL (KFM redirected them into "OneDrive - DOI\..."), and its
 #   classic Documents folder exists as a near-empty (4-item) leftover sitting alongside the real,
-#   populated (84-item) OneDrive-redirected one. Concretely, this meant Remove-UserPersonalFiles
+#   populated (84-item) OneDrive-redirected one. Concretely, this meant Remove-UserPersonalFile
 #   was either silently doing nothing (Test-Path on a folder that doesn't exist) or wiping a stale
 #   leftover folder while the user's ACTUAL files at the redirected location were never touched -
 #   on any KFM-enabled machine, the "wipe personal files" step was not wiping the user's personal
@@ -304,7 +304,7 @@
 #   resolves to the actual populated OneDrive-redirected folders instead of the empty/nonexistent
 #   classic ones.
 # Date: 15-Aug-2026 Version 2.31 - Follow-on risk found while reviewing the 2.30 fix itself: once
-#   Remove-UserPersonalFiles correctly resolves Desktop/Documents/Pictures to their real,
+#   Remove-UserPersonalFile correctly resolves Desktop/Documents/Pictures to their real,
 #   OneDrive Known Folder Move-redirected location, deleting files there is only safe if OneDrive
 #   is no longer actively signed in and syncing - otherwise the local deletion syncs straight up
 #   to the user's actual cloud storage, destroying their real files on every device, not just this
@@ -313,7 +313,7 @@
 #   in task order - but the GUI checklist lets a technician deselect 'Remove OneDrive Accounts'
 #   while leaving 'Wipe Personal Files' checked, and that combination was NOT safe: this
 #   function's safety implicitly depended on a different, independently-selectable checkbox.
-#   Fixed by having Remove-UserPersonalFiles stop OneDrive.exe itself, unconditionally, as its own
+#   Fixed by having Remove-UserPersonalFile stop OneDrive.exe itself, unconditionally, as its own
 #   first action - it no longer relies on another task having already run.
 # Date: 15-Aug-2026 Version 2.32 - Found a gap in the 2.30 fix itself while re-checking its own
 #   reasoning: Resolve-UserShellFolder's callers assumed Downloads/Videos/Music were always at
@@ -323,7 +323,7 @@
 #   registry key and DOES support redirecting all six folders, not just the three OneDrive KFM
 #   covers. Confirmed the registry value names for the other three ('My Video', 'My Music', and
 #   the GUID-keyed '{374DE290-123F-4565-9164-39C4925E467B}' for Downloads) and extended both
-#   Remove-UserPersonalFiles and Remove-OutlookProfile's PST search to resolve all six folders
+#   Remove-UserPersonalFile and Remove-OutlookProfile's PST search to resolve all six folders
 #   through Resolve-UserShellFolder instead of assuming half of them are always classic.
 #   Also hardened $UsersBase itself: it was hardcoded to "$env:SystemDrive\Users", which every
 #   single cleanup function in this script depends on being correct. Now reads the authoritative
@@ -334,7 +334,7 @@
 #   Verified all six folder resolutions and the ProfilesDirectory read against this machine's live
 #   registry.
 # Date: 15-Aug-2026 Version 2.33 - Found an interaction bug in the 2.31 fix itself while doing a
-#   correctness re-read of Remove-UserPersonalFiles rather than more live-system inspection: the
+#   correctness re-read of Remove-UserPersonalFile rather than more live-system inspection: the
 #   2.31 fix added Stop-ProcessAndWait -Name 'OneDrive' as the function's first action, running
 #   BEFORE the wallpaper file got copied to its stash location. If the current wallpaper's source
 #   image is a OneDrive Files On-Demand placeholder that hasn't been downloaded locally yet,
@@ -360,7 +360,7 @@
 #   local profile on the machine other than whoever happens to be running the script (confirmed a
 #   second real profile, WsiAccount, exists on this machine), Resolve-UserShellFolder was silently
 #   resolving Downloads/Videos/Music to the TECHNICIAN'S OWN folders instead of that user's -
-#   meaning Remove-UserPersonalFiles never actually wiped another user's Downloads/Videos/Music,
+#   meaning Remove-UserPersonalFile never actually wiped another user's Downloads/Videos/Music,
 #   and Remove-OutlookProfile's PST search never actually searched another user's real Downloads.
 #   Fixed by replacing the "%USERPROFILE%" token with the target user's actual $ProfilePath
 #   (already an available parameter, always correct for that specific user) before any other
@@ -436,7 +436,7 @@
 #   - Clear-KeePassData: KeePass.config.xml (confirmed present) and the legacy HKCU\Software\
 #     KeePass registry key - clears the Most-Recently-Used database list (discloses WHERE this
 #     user's credential vaults are kept) without touching any actual .kdbx file, which is real
-#     user data already covered by Remove-UserPersonalFiles wherever it lives.
+#     user data already covered by Remove-UserPersonalFile wherever it lives.
 # Date: 15-Aug-2026 Version 2.38 - Found and fixed an argument-injection gap in the self-elevation
 #   relaunch logic, during a dedicated static+dynamic pass over the whole script. The
 #   foreach ($key in $PSBoundParameters.Keys) loop that rebuilds $argList for the elevated child
@@ -529,7 +529,7 @@
 # Date: 06-Sep-2026 Version 2.42 - Fixed a real user report: running this script was breaking
 #   application/network shortcuts on the Desktop and in the Start Menu/taskbar. Two distinct
 #   causes, both fixed:
-#   - Remove-UserPersonalFiles' Desktop wipe deleted every file in the folder indiscriminately,
+#   - Remove-UserPersonalFile's Desktop wipe deleted every file in the folder indiscriminately,
 #     including .lnk/.url shortcuts - only the wallpaper picture was ever special-cased for
 #     preservation. Desktop shortcuts are pointers, not personal data, so the wipe now skips
 #     .lnk/.url specifically on the Desktop target while still fully wiping Documents/Pictures/
@@ -539,7 +539,7 @@
 #     default Start Menu/taskbar layout - which also destroyed any app deliberately pinned to
 #     Start or the taskbar (including org-deployed pins, not just the previous user's own
 #     customizations). Removed the function and its checklist entry entirely rather than leaving
-#     a neutered no-op behind; Clear-PinnedItems (Jump Lists/Recent Items/Quick Access pins) is
+#     a neutered no-op behind; Clear-PinnedItem (Jump Lists/Recent Items/Quick Access pins) is
 #     unrelated and unaffected.
 # Date: 06-Sep-2026 Version 2.43 - Independent audit (fresh review, not self-reported) of the
 #   areas that had gotten the least scrutiny across 42 prior passes - the WinForms checklist, the
@@ -571,21 +571,21 @@
 #     can be independently redirected by classic GPO Folder Redirection - on a redirected machine,
 #     recorded Teams meetings and Win+G screen captures survived the "wipe" while the step reported
 #     success. Both now resolve the real per-user Videos location the same way
-#     Remove-UserPersonalFiles already does.
+#     Remove-UserPersonalFile already does.
 #   - Cosmetic: Move-ArtifactOffMachine's Copy-Item, when relocating a directory (the -BackupPst
 #     case) into the already-created $destRoot, was copying the source directory itself as a
 #     subfolder rather than its contents - producing an extra "PstBackup_<machine>_<timestamp>\
 #     PstBackup\*.pst" nesting level instead of landing the files directly under the timestamped
 #     folder. Fixed by copying "$SourcePath\*" for directory sources (with an empty-directory
 #     guard, since that wildcard resolves to nothing and Copy-Item would otherwise throw).
-#   - Cosmetic: Clear-PinnedItems only released the outer Shell.Application COM object; the
+#   - Cosmetic: Clear-PinnedItem only released the outer Shell.Application COM object; the
 #     per-iteration Namespace folder object and each enumerated FolderItem were never explicitly
 #     released, a minor non-fatal RCW leak scoped to that one step's up-to-50 loop iterations. Both
 #     are now released via Marshal.ReleaseComObject as they go out of scope.
 # Date: 06-Sep-2026 Version 2.44 - Third independent audit pass, targeting the ~30 individual
 #   cleanup functions and GUI/Main-flow areas the first two passes hadn't examined closely. Found
 #   and fixed four real issues:
-#   - Clear-UserCertificates ran `Get-ChildItem Cert:\CurrentUser\My | Remove-Item -DeleteKey`
+#   - Clear-UserCertificate ran `Get-ChildItem Cert:\CurrentUser\My | Remove-Item -DeleteKey`
 #     "for the current session" before the per-hive registry/file cleanup that covers every real
 #     profile - but CurrentUser inside this elevated session is the TECHNICIAN's own profile (or
 #     whatever admin account is running the script), never the departing employee's. Unlike this
@@ -611,7 +611,7 @@
 #     meaning the technician's own reusable USB drive got swept in as an ordinary target drive on
 #     every single run. Most costly for -SecureWipe's cipher /w pass (30-60+ minutes per drive per
 #     its own doc) - pointless against an IT tool with nothing needing forensic protection, and
-#     compounding across every machine in a stack. Added a shared Get-TargetFileSystemDrives helper
+#     compounding across every machine in a stack. Added a shared Get-TargetFileSystemDrive helper
 #     that excludes the drive backing $PSScriptRoot when running from removable media, used by all
 #     three.
 #   - Clear-FireFox filtered profile folders with `-match '\.default|\.dev-edition-default'`, which
@@ -635,7 +635,7 @@
 #     same ordered $script:AllTasks that the main task loop iterates, so they ran as the tail of
 #     that SAME loop - which finishes entirely before the separate, unconditional 'Relocate PST
 #     Backups' step that follows it. That's the reverse of both this file's own stated intent (the
-#     comment above these entries, and Clear-ShadowCopies's own .DESCRIPTION, both assert they run
+#     comment above these entries, and Clear-ShadowCopy's own .DESCRIPTION, both assert they run
 #     "after PST relocation") and of what -SecureWipe is FOR: with -BackupPst -SecureWipe both set,
 #     cipher /w's free-space overwrite completed before the local PST backup copy was deleted, so
 #     the blocks it freed were never covered by the wipe and stayed undelete-recoverable - directly
@@ -650,13 +650,13 @@
 #     -ErrorAction SilentlyContinue. This directly contradicted the function's own .DESCRIPTION
 #     ("skips WITH A WARNING any profile whose hive fails to load"). Added the missing warning-and-
 #     return branch, matching the existing pattern for a failed `reg load`.
-#   - Clear-EventLogs filtered logs via an unguarded `Where-Object { $_.RecordCount -gt 0 }` - some
+#   - Clear-DeviceEventLog filtered logs via an unguarded `Where-Object { $_.RecordCount -gt 0 }` - some
 #     disabled Analytic/Debug channels are documented to throw the moment RecordCount is accessed,
 #     even past Get-WinEvent's own -ErrorAction SilentlyContinue, which (the same pipeline-abort
 #     class of bug already fixed once in Invoke-ForEachUserHive) could silently leave every log
 #     after the throwing one uncleared. Moved the RecordCount check into a per-item try/catch
 #     inside the ForEach-Object instead of a preceding Where-Object.
-#   - Two cosmetic doc-comment fixes: Clear-PinnedItems had a duplicated "The The" from a prior
+#   - Two cosmetic doc-comment fixes: Clear-PinnedItem had a duplicated "The The" from a prior
 #     edit, and separately was missing Marshal.ReleaseComObject on the FolderItems collection
 #     object itself (only the Namespace and each individual FolderItem were released) - now
 #     captured in its own variable and released. Clear-AmcacheAndShimCache's .DESCRIPTION had the
@@ -899,7 +899,7 @@ if ($BackupPst -and -not $script:RunningFromRemovableMedia) {
 # to run against an IT tool that gets reused across every machine in a stack.
 $script:ScriptDriveLetter = (Get-Item $PSScriptRoot -ErrorAction SilentlyContinue).PSDrive.Name
 
-function Get-TargetFileSystemDrives {
+function Get-TargetFileSystemDrive {
     <#
     .SYNOPSIS
         Returns the machine's FileSystem drives to run whole-drive cleanup
@@ -1007,12 +1007,18 @@ function Stop-ProcessAndWait {
     .PARAMETER Name
         Process name without the .exe extension (as used by Get-Process), e.g. 'chrome'.
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param([string]$Name)
     $proc = Get-Process $Name -ErrorAction SilentlyContinue
     if ($proc) {
-        $proc | Stop-Process -Force -ErrorAction SilentlyContinue
-        $proc | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
-        Write-Host "$Name processes stopped..." -ForegroundColor Green
+        if ($PSCmdlet.ShouldProcess($Name, 'Stop process')) {
+            $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+            $proc | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+            Write-Host "$Name processes stopped..." -ForegroundColor Green
+        }
     }
     else {
         Write-Host "$Name not running..." -ForegroundColor Yellow
@@ -1501,7 +1507,7 @@ Function Clear-Edge {
     Write-Host -ForegroundColor Yellow "Edge Cache Removal - COMPLETE`r`n"
 }
 
-Function Remove-OneDriveAccounts {
+Function Remove-OneDriveAccount {
     <#
     .SYNOPSIS
         Unlinks OneDrive Business and Personal account sign-ins for all users.
@@ -1519,6 +1525,11 @@ Function Remove-OneDriveAccounts {
     .NOTES
         Official command used: OneDrive.exe /reset (current session only).
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     Write-Host "Clearing OneDrive accounts - Business and Personal (all users)..."
     Stop-ProcessAndWait -Name 'OneDrive'
 
@@ -1532,7 +1543,7 @@ Function Remove-OneDriveAccounts {
     # the registry-based removal below still covers every other profile on
     # the machine (and doubles as a safety net for this one too).
     $oneDriveExe = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
-    if (Test-Path $oneDriveExe) {
+    if ((Test-Path $oneDriveExe) -and $PSCmdlet.ShouldProcess("OneDrive ($env:USERNAME)", 'Run OneDrive.exe /reset')) {
         Start-Process -FilePath $oneDriveExe -ArgumentList '/reset' -WindowStyle Hidden -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 5
         Stop-ProcessAndWait -Name 'OneDrive'
@@ -1567,12 +1578,16 @@ Function Remove-OneDriveAccounts {
             Get-ChildItem $desktopPath -ErrorAction SilentlyContinue |
                 Where-Object { (Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue).'(Default)' -eq $oneDriveName } |
                 ForEach-Object {
-                    Remove-Item -Path $_.PSPath -Recurse -ErrorAction SilentlyContinue
-                    Write-Host "  Removed Explorer namespace key for ""$oneDriveName"""
+                    if ($PSCmdlet.ShouldProcess($_.PSPath, 'Remove Explorer namespace key')) {
+                        Remove-Item -Path $_.PSPath -Recurse -ErrorAction SilentlyContinue
+                        Write-Host "  Removed Explorer namespace key for ""$oneDriveName"""
+                    }
                 }
 
-            Remove-Item -Path $oneDriveAccountKeyPath -Recurse -ErrorAction SilentlyContinue
-            Write-Host "  Removed $oneDriveAccountKeyPath"
+            if ($PSCmdlet.ShouldProcess($oneDriveAccountKeyPath, 'Remove OneDrive account registry key')) {
+                Remove-Item -Path $oneDriveAccountKeyPath -Recurse -ErrorAction SilentlyContinue
+                Write-Host "  Removed $oneDriveAccountKeyPath"
+            }
         }
     }
 
@@ -1587,9 +1602,16 @@ Function Remove-UserCache {
         Deletes the contents of AppData\Local\Temp for every profile under
         $UsersBase, not just the current session's own account.
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     Write-Host "Clearing user temp caches (all users)..."
     # $UsersBase covers every profile on the machine, not just the current session
-    Remove-Item "$UsersBase\*\AppData\Local\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+    if ($PSCmdlet.ShouldProcess("$UsersBase\*\AppData\Local\Temp", 'Remove user temp cache contents')) {
+        Remove-Item "$UsersBase\*\AppData\Local\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Write-Host -ForegroundColor Yellow "User Cache Removal - COMPLETE`r`n"
 }
 
@@ -1603,7 +1625,7 @@ Function Clear-WER {
         machine-wide WER ReportQueue and ReportArchive under $env:ProgramData. This
         is Windows Error Reporting's own report queue/archive - distinct from the
         raw crash dump files apps write directly via WerFault/LocalDumps, which
-        Clear-DiagnosticArtifacts handles separately.
+        Clear-DiagnosticArtifact handles separately.
     #>
     Write-Host "Clearing Windows Error Reporting data (all users and system)..."
     # Per-user crash reports can contain stack traces, env variables, and partial memory dumps
@@ -1673,7 +1695,7 @@ Function Clear-WindowsTemp {
     Write-Host -ForegroundColor Yellow "Windows Temp / Windows Update Reset - COMPLETE`r`n"
 }
 
-Function Clear-NetworkCredentials {
+Function Clear-NetworkCredential {
     <#
     .SYNOPSIS
         Removes every stored credential from the current user's Credential Manager
@@ -1846,7 +1868,7 @@ Function Clear-WindowsHistory {
     Write-Host -ForegroundColor Yellow "Windows History Removal - COMPLETE`r`n"
 }
 
-Function Clear-EventLogs {
+Function Clear-DeviceEventLog {
     <#
     .SYNOPSIS
         Clears every non-empty Windows Event Log, classic and modern channels alike.
@@ -1929,27 +1951,44 @@ Function Remove-TeamsProfile {
         deletion here matches Microsoft's own documented Teams troubleshooting
         guidance.
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     # Classic Teams (v1) - stop process, then clear data for ALL users on the machine
     Stop-ProcessAndWait -Name 'teams'
 
     Get-Item "$UsersBase\*\AppData\Roaming\Microsoft\Teams" -ErrorAction SilentlyContinue |
         ForEach-Object {
-            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "Classic Teams removed for: $(Get-ProfileNameFromPath $_.FullName)" -ForegroundColor Cyan
+            if ($PSCmdlet.ShouldProcess($_.FullName, 'Remove classic Teams profile data')) {
+                Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "Classic Teams removed for: $(Get-ProfileNameFromPath $_.FullName)" -ForegroundColor Cyan
+            }
         }
     Get-Item "$UsersBase\*\AppData\Local\Microsoft\Teams" -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        ForEach-Object {
+            if ($PSCmdlet.ShouldProcess($_.FullName, 'Remove classic Teams local app data')) {
+                Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     # AAD Broker Plugin caches Azure AD auth tokens shared by Teams and other apps
     Get-Item "$UsersBase\*\AppData\Local\Packages\Microsoft.AAD.BrokerPlugin_*" -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        ForEach-Object {
+            if ($PSCmdlet.ShouldProcess($_.FullName, 'Remove AAD Broker Plugin cache')) {
+                Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
 
     # New Teams (v2) - process: ms-teams, data: LocalAppData\Packages\MSTeams_* (all users)
     Stop-ProcessAndWait -Name 'ms-teams'
 
     Get-Item "$UsersBase\*\AppData\Local\Packages\MSTeams_*" -ErrorAction SilentlyContinue |
         ForEach-Object {
-            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "New Teams (v2) removed for: $(Get-ProfileNameFromPath $_.FullName)" -ForegroundColor Cyan
+            if ($PSCmdlet.ShouldProcess($_.FullName, 'Remove new Teams (v2) package data')) {
+                Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "New Teams (v2) removed for: $(Get-ProfileNameFromPath $_.FullName)" -ForegroundColor Cyan
+            }
         }
 
     # Meeting recordings saved locally - can be large and contain sensitive
@@ -1957,11 +1996,14 @@ Function Remove-TeamsProfile {
     # than assumed at the classic "<profile>\Videos" path - classic GPO Folder
     # Redirection can relocate Videos independently of OneDrive KFM (same gap
     # already fixed for Desktop/Documents/Pictures/Downloads/Videos/Music in
-    # Remove-UserPersonalFiles; this step had never been migrated to match).
+    # Remove-UserPersonalFile; this step had never been migrated to match).
     Invoke-ForEachUserHive {
         param([string]$Sid, [string]$ProfilePath)
         $videos = Resolve-UserShellFolder -Sid $Sid -ProfilePath $ProfilePath -RegValueName 'My Video' -ClassicName 'Videos'
-        Remove-Item (Join-Path $videos 'Microsoft Teams\*') -Recurse -Force -ErrorAction SilentlyContinue
+        $recordingsPath = Join-Path $videos 'Microsoft Teams'
+        if ($PSCmdlet.ShouldProcess($recordingsPath, 'Remove Teams meeting recordings')) {
+            Remove-Item (Join-Path $recordingsPath '*') -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     Write-Host -ForegroundColor Yellow "Teams Profile Removal - COMPLETE`r`n"
@@ -2000,6 +2042,11 @@ Function Remove-OutlookProfile {
         the classic path would miss a PST filed under a KFM-redirected Documents
         folder - see Version 2.30 changelog.
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     Stop-ProcessAndWait -Name 'outlook'
 
     # Registry profile key - clear for every user hive, not just the running user.
@@ -2023,8 +2070,10 @@ Function Remove-OutlookProfile {
     $pstPathOwners  = @{}
     Invoke-ForEachUserHive {
         param([string]$Sid, [string]$ProfilePath)
-        Remove-Item "Registry::HKU\$Sid\Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles" `
-            -Force -Recurse -ErrorAction SilentlyContinue
+        $outlookProfileKey = "Registry::HKU\$Sid\Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles"
+        if ($PSCmdlet.ShouldProcess($outlookProfileKey, 'Remove Outlook profile registry key')) {
+            Remove-Item $outlookProfileKey -Force -Recurse -ErrorAction SilentlyContinue
+        }
         $userName = Split-Path $ProfilePath -Leaf
         Write-Host "  Outlook profile registry cleared for: $userName"
 
@@ -2042,9 +2091,11 @@ Function Remove-OutlookProfile {
     }
 
     # OST files can be gigabytes of cached email/calendar/contacts - remove across all users
-    Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.ost"     -Force -ErrorAction SilentlyContinue
-    Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.ost.old" -Force -ErrorAction SilentlyContinue
-    Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.nk2"     -Force -ErrorAction SilentlyContinue
+    if ($PSCmdlet.ShouldProcess("$UsersBase\*\AppData\Local\Microsoft\Outlook", 'Remove cached OST/NK2 files')) {
+        Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.ost"     -Force -ErrorAction SilentlyContinue
+        Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.ost.old" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$UsersBase\*\AppData\Local\Microsoft\Outlook\*.nk2"     -Force -ErrorAction SilentlyContinue
+    }
 
     # New Outlook for Windows - a separate UWP app (Microsoft.OutlookForWindows)
     # with its own independent LocalCache/LocalState mail/calendar/contacts store.
@@ -2054,8 +2105,10 @@ Function Remove-OutlookProfile {
     Stop-ProcessAndWait -Name 'olk'
     Get-Item "$UsersBase\*\AppData\Local\Packages\Microsoft.OutlookForWindows_*" -ErrorAction SilentlyContinue |
         ForEach-Object {
-            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "  New Outlook data removed for: $(Get-ProfileNameFromPath $_.FullName)"
+            if ($PSCmdlet.ShouldProcess($_.FullName, 'Remove New Outlook package data')) {
+                Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "  New Outlook data removed for: $(Get-ProfileNameFromPath $_.FullName)"
+            }
         }
 
     # PST files - search each user's REAL Documents/Desktop (resolved above,
@@ -2111,12 +2164,16 @@ Function Remove-OutlookProfile {
         $pstFilesToDelete = $pstFiles | Where-Object { $_.FullName -notin $failedBackups }
     }
 
-    $pstFilesToDelete | Remove-Item -Force -ErrorAction SilentlyContinue
+    foreach ($pst in $pstFilesToDelete) {
+        if ($PSCmdlet.ShouldProcess($pst.FullName, 'Remove PST file')) {
+            Remove-Item -Path $pst.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
 
     Write-Host -ForegroundColor Yellow "Outlook Profile Removal - COMPLETE`r`n"
 }
 
-Function Clear-PinnedItems {
+Function Clear-PinnedItem {
     <#
     .SYNOPSIS
         Clears Jump List/Recent Items history and unpins every Quick Access folder,
@@ -2202,7 +2259,7 @@ Function Clear-PinnedItems {
     Write-Host -ForegroundColor Yellow "Pinned Items Removal - COMPLETE`r`n"
 }
 
-Function Clear-WifiProfiles {
+Function Clear-WifiProfile {
     <#
     .SYNOPSIS
         Deletes every saved Wi-Fi network profile (SSID + password), machine-wide.
@@ -2238,11 +2295,11 @@ Function Clear-NetworkHistory {
         registry keys - Windows' own record of every network (wired, wireless, or
         VPN) this machine has ever joined, including friendly name, category
         (Public/Private/Domain), and last-connected time. Distinct from
-        Clear-WifiProfiles: this history survives even after the Wi-Fi
+        Clear-WifiProfile: this history survives even after the Wi-Fi
         profile/password itself is deleted.
     #>
     Write-Host "Clearing Windows network location history..."
-    # Distinct from Clear-WifiProfiles above: this is Windows' own record of
+    # Distinct from Clear-WifiProfile above: this is Windows' own record of
     # every network (wired, wireless, or VPN) this machine has ever joined -
     # friendly name, category (Public/Private/Domain), last-connected time -
     # which survives even after the Wi-Fi profile/password itself is deleted.
@@ -2252,7 +2309,7 @@ Function Clear-NetworkHistory {
     Write-Host -ForegroundColor Yellow "Network History Cleanup - COMPLETE`r`n"
 }
 
-Function Clear-ProxySettings {
+Function Clear-ProxySetting {
     <#
     .SYNOPSIS
         Resets both the machine-wide WinHTTP proxy and each user's IE/WinINET
@@ -2354,19 +2411,19 @@ Function Invoke-RecycleBinCleanup {
     # present for some reason (e.g. an unusually stripped-down PowerShell
     # install).
     if (Get-Command Microsoft.PowerShell.Management\Clear-RecycleBin -ErrorAction SilentlyContinue) {
-        Get-TargetFileSystemDrives | ForEach-Object {
+        Get-TargetFileSystemDrive | ForEach-Object {
             Microsoft.PowerShell.Management\Clear-RecycleBin -DriveLetter $_.Name -Force -ErrorAction SilentlyContinue
         }
     }
     else {
-        Get-TargetFileSystemDrives | ForEach-Object {
+        Get-TargetFileSystemDrive | ForEach-Object {
             Remove-Item "$($_.Root)`$Recycle.Bin\*" -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
     Write-Host -ForegroundColor Yellow "Recycle Bin Cleanup - COMPLETE`r`n"
 }
 
-Function Clear-VpnConnections {
+Function Clear-VpnConnection {
     <#
     .SYNOPSIS
         Removes every all-user (machine-wide) built-in Windows VPN connection.
@@ -2378,13 +2435,13 @@ Function Clear-VpnConnections {
         (-AllUserConnection). Platform limitation, not a script gap: per-user VPN
         connections can't be enumerated or removed for another account without
         running as that user - the same limitation documented in
-        Clear-NetworkCredentials.
+        Clear-NetworkCredential.
     #>
     Write-Host "Clearing all-user VPN connections..."
     # Only covers -AllUserConnection scope (built-in Windows VPN profiles
     # shared machine-wide). Per-user VPN connections can't be enumerated or
     # removed for another account without running as that user - the same
-    # Windows platform limitation documented in Clear-NetworkCredentials.
+    # Windows platform limitation documented in Clear-NetworkCredential.
     Get-VpnConnection -AllUserConnection -ErrorAction SilentlyContinue | ForEach-Object {
         Remove-VpnConnection -Name $_.Name -AllUserConnection -Force -ErrorAction SilentlyContinue
         Write-Host "  Removed VPN connection: $($_.Name)"
@@ -2392,7 +2449,7 @@ Function Clear-VpnConnections {
     Write-Host -ForegroundColor Yellow "VPN Connection Removal - COMPLETE`r`n"
 }
 
-Function Clear-AutologonCredentials {
+Function Clear-AutologonCredential {
     <#
     .SYNOPSIS
         Removes a plaintext autologon credential from the Winlogon registry key,
@@ -2431,7 +2488,7 @@ Function Clear-AutologonCredentials {
     Write-Host -ForegroundColor Yellow "Autologon Credential Cleanup - COMPLETE`r`n"
 }
 
-Function Remove-NetworkPrinters {
+Function Remove-NetworkPrinter {
     <#
     .SYNOPSIS
         Removes network/remote printer connections, excluding built-in virtual
@@ -2449,27 +2506,34 @@ Function Remove-NetworkPrinters {
         visible to this elevated session (machine-wide or this account's own) - a
         standard user's own per-user printer connection added without admin rights
         isn't visible here, the same limitation documented in
-        Clear-NetworkCredentials.
+        Clear-NetworkCredential.
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     Write-Host "Removing network/remote printer connections..."
     # Only removes connections visible to this elevated session (machine-wide
     # or this account's own) - a standard user's own per-user printer
     # connection added without admin rights isn't visible here, the same
-    # limitation as Clear-NetworkCredentials. Virtual printers are excluded
+    # limitation as Clear-NetworkCredential. Virtual printers are excluded
     # by name so this doesn't strip built-in "Print to PDF"/Fax/OneNote.
     $virtualPrinters = 'Microsoft Print to PDF', 'Microsoft XPS Document Writer', 'Fax', 'OneNote (Desktop)', 'OneNote for Windows 10', 'Send To OneNote 2016'
 
     Get-Printer -ErrorAction SilentlyContinue |
         Where-Object { $_.Type -eq 'Connection' -and $_.Name -notin $virtualPrinters } |
         ForEach-Object {
-            Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
-            Write-Host "  Removed printer: $($_.Name)"
+            if ($PSCmdlet.ShouldProcess($_.Name, 'Remove network printer connection')) {
+                Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+                Write-Host "  Removed printer: $($_.Name)"
+            }
         }
 
     Write-Host -ForegroundColor Yellow "Network Printer Removal - COMPLETE`r`n"
 }
 
-Function Remove-NonMicrosoftScheduledTasks {
+Function Remove-NonMicrosoftScheduledTask {
     <#
     .SYNOPSIS
         Removes scheduled tasks not registered under the \Microsoft\ task-path
@@ -2487,6 +2551,11 @@ Function Remove-NonMicrosoftScheduledTasks {
         leftovers from whatever the previous user personally installed, not a
         vetted allowlist of every legitimate task publisher.
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     Write-Host "Removing non-Microsoft scheduled tasks..."
     # Excludes anything nested under \Microsoft\ - that covers the OS's own
     # tasks and the common case of management-tool tasks registered under a
@@ -2498,8 +2567,10 @@ Function Remove-NonMicrosoftScheduledTasks {
     Get-ScheduledTask -ErrorAction SilentlyContinue |
         Where-Object { $_.TaskPath -notmatch '^\\Microsoft\\' } |
         ForEach-Object {
-            Unregister-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Host "  Removed scheduled task: $($_.TaskPath)$($_.TaskName)"
+            if ($PSCmdlet.ShouldProcess("$($_.TaskPath)$($_.TaskName)", 'Unregister scheduled task')) {
+                Unregister-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Host "  Removed scheduled task: $($_.TaskPath)$($_.TaskName)"
+            }
         }
     Write-Host -ForegroundColor Yellow "Scheduled Task Cleanup - COMPLETE`r`n"
 }
@@ -2543,7 +2614,7 @@ Function Clear-SearchIndex {
     Write-Host -ForegroundColor Yellow "Search Index Reset - COMPLETE (rebuilds automatically in the background)`r`n"
 }
 
-Function Clear-DiagnosticArtifacts {
+Function Clear-DiagnosticArtifact {
     <#
     .SYNOPSIS
         Clears per-user crash dumps, Activity Timeline history, Sticky Notes,
@@ -2692,7 +2763,7 @@ Function Clear-AdobeHistory {
     Write-Host -ForegroundColor Yellow "Adobe/Bluebeam History Removal - COMPLETE`r`n"
 }
 
-Function Clear-SyncClientCaches {
+Function Clear-SyncClientCache {
     <#
     .SYNOPSIS
         Clears Box/Dropbox/Google Drive app cache and sign-in data for all users,
@@ -2717,7 +2788,7 @@ Function Clear-SyncClientCaches {
     Write-Host -ForegroundColor Yellow "Sync Client Cache Cleanup - COMPLETE`r`n"
 }
 
-Function Clear-UserCertificates {
+Function Clear-UserCertificate {
     <#
     .SYNOPSIS
         Clears each user's personal ("My") certificate store, including private
@@ -2765,7 +2836,7 @@ Function Clear-UserCertificates {
     Write-Host -ForegroundColor Yellow "Certificate Store Cleanup - COMPLETE`r`n"
 }
 
-Function Clear-DevCredentials {
+Function Clear-DevCredential {
     <#
     .SYNOPSIS
         Clears SSH private keys and Git configuration/credentials for all users.
@@ -2790,7 +2861,7 @@ Function Clear-DevCredentials {
     Write-Host -ForegroundColor Yellow "Dev Credential Cleanup - COMPLETE`r`n"
 }
 
-Function Clear-MappedDrives {
+Function Clear-MappedDrive {
     <#
     .SYNOPSIS
         Removes persisted (reconnect-at-logon) network drive mappings for all
@@ -2835,7 +2906,7 @@ Function Clear-MappedDrives {
     Write-Host -ForegroundColor Yellow "Mapped Drive Cleanup - COMPLETE`r`n"
 }
 
-Function Clear-MeetingAppCaches {
+Function Clear-MeetingAppCache {
     <#
     .SYNOPSIS
         Clears Zoom and WebEx local app cache for all users.
@@ -2915,7 +2986,7 @@ Function Clear-MiscAppData {
     Write-Host -ForegroundColor Yellow "Misc App Data Cleanup - COMPLETE`r`n"
 }
 
-Function Remove-UserPersonalFiles {
+Function Remove-UserPersonalFile {
     <#
     .SYNOPSIS
         Deletes the actual contents of Desktop/Documents/Downloads/Pictures/
@@ -2965,6 +3036,11 @@ Function Remove-UserPersonalFiles {
         On-Demand placeholder would fail to copy once OneDrive.exe was already
         stopped, silently losing the preservation guarantee (Version 2.33).
     #>
+    # ConfirmImpact 'Medium' is below the default $ConfirmPreference of 'High',
+    # so ShouldProcess never prompts during a normal unattended run - it only
+    # enables -WhatIf/-Confirm for someone testing this script.
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param()
     Write-Host "Wiping personal files (Desktop/Documents/Downloads/Pictures/Videos/Music) for all users..." -ForegroundColor Red
     Write-Host "  Each user's current desktop background picture is preserved, even if it lives in one of these folders." -ForegroundColor Yellow
     Write-Host "  Desktop shortcuts (.lnk/.url) are preserved; everything else on the Desktop is wiped." -ForegroundColor Yellow
@@ -3003,7 +3079,7 @@ Function Remove-UserPersonalFiles {
     }
 
     # Stopped here, AFTER the wallpaper has already been safely stashed above -
-    # not just relied on from Remove-OneDriveAccounts running earlier: the
+    # not just relied on from Remove-OneDriveAccount running earlier: the
     # tech-facing GUI checklist lets 'Remove OneDrive Accounts' be deselected
     # while 'Wipe Personal Files' stays checked. If Desktop/Documents/Pictures
     # are OneDrive Known Folder Move-redirected and OneDrive is still actively
@@ -3050,7 +3126,9 @@ Function Remove-UserPersonalFiles {
                     if ($target.Name -eq 'Desktop') {
                         $items = $items | Where-Object { $_.Extension -notin '.lnk', '.url' }
                     }
-                    $items | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                    if ($PSCmdlet.ShouldProcess($target.Path, "Wipe $($target.Name) contents")) {
+                        $items | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                    }
                 }
             }
 
@@ -3183,7 +3261,7 @@ Function Invoke-DISMCleanup {
     }
 }
 
-Function Clear-ShadowCopies {
+Function Clear-ShadowCopy {
     <#
     .SYNOPSIS
         Deletes every Volume Shadow Copy / System Restore point on the machine.
@@ -3252,7 +3330,7 @@ Function Clear-UsnJournal {
     # things that no longer exist can still surface here. Windows rebuilds
     # the journal automatically as soon as anything writes to the volume
     # again, so this is a no-risk reset, not a permanent disable.
-    Get-TargetFileSystemDrives | ForEach-Object {
+    Get-TargetFileSystemDrive | ForEach-Object {
         fsutil usn deletejournal /D $_.Root.TrimEnd('\') 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "  Could not reset USN journal on $($_.Root) (fsutil exit $LASTEXITCODE)."
@@ -3292,7 +3370,7 @@ Function Clear-AmcacheAndShimCache {
     Write-Host -ForegroundColor Yellow "Amcache/ShimCache Cleanup - COMPLETE`r`n"
 }
 
-Function Clear-SetupLogs {
+Function Clear-SetupLog {
     <#
     .SYNOPSIS
         Clears Windows setup/OOBE and servicing log files.
@@ -3371,7 +3449,7 @@ Function Invoke-SecureFreeSpaceWipe {
         of the preceding cleanup stick instead of just being hidden. Only runs
         when the script-level -SecureWipe switch is passed (off by default purely
         for the time cost - 30-60+ minutes per drive - not the risk), and runs
-        last in the task order, after Clear-ShadowCopies and Clear-UsnJournal.
+        last in the task order, after Clear-ShadowCopy and Clear-UsnJournal.
     .NOTES
         Official command used: cipher /w:<drive>. No PowerShell cmdlet equivalent
         exists; this is Windows' own documented free-space overwrite tool.
@@ -3383,7 +3461,7 @@ Function Invoke-SecureFreeSpaceWipe {
     # undelete tools until the space is reused. cipher /w is Windows' own
     # built-in 3-pass free-space overwrite, and is what actually makes all
     # of the preceding cleanup stick instead of just being hidden.
-    Get-TargetFileSystemDrives | ForEach-Object {
+    Get-TargetFileSystemDrive | ForEach-Object {
         $drive = $_.Root.TrimEnd('\')
         Write-Host "  Wiping free space on $drive ..."
         cipher /w:$drive | Out-Null
@@ -3394,7 +3472,7 @@ Function Invoke-SecureFreeSpaceWipe {
     Write-Host -ForegroundColor Yellow "Secure Free-Space Wipe - COMPLETE`r`n"
 }
 
-Function Clear-NetworkCaches {
+Function Clear-NetworkCache {
     <#
     .SYNOPSIS
         Flushes the DNS resolver cache, the ARP/neighbor cache, and the NetBIOS
@@ -3593,7 +3671,7 @@ Function Clear-SnagitData {
         preview images of recent screen captures - the actual privacy-relevant
         piece, since it reveals recent screen activity even if the full-
         resolution original was saved elsewhere (and possibly already removed
-        by Remove-UserPersonalFiles if it landed under Documents/Pictures).
+        by Remove-UserPersonalFile if it landed under Documents/Pictures).
         Deliberately does NOT touch the License subfolder (license activation
         state - removing it would force the next user to re-activate a
         volume-licensed install for no privacy benefit) or TrackerbirdFiles
@@ -3611,7 +3689,7 @@ Function Clear-KeePassData {
         for every user.
     .DESCRIPTION
         Does NOT touch any actual .kdbx password database file (those are real
-        user files, already caught by Remove-UserPersonalFiles wherever they
+        user files, already caught by Remove-UserPersonalFile wherever they
         happen to live, and KeePass never stores the master password itself in
         its own config regardless). What this clears is KeePass.config.xml
         under AppData\Roaming\KeePass (confirmed present on this machine) -
@@ -3672,19 +3750,19 @@ $script:AllTasks = [ordered]@{
     'Clear IE'                   = { Clear-IE }                              # IE cache + shared WebCacheV01.dat
     'Clear Firefox'              = { Clear-FireFox }                         # Firefox cache/cookies/history/logins, all users
     'Clear Edge'                 = { Clear-Edge }                            # Edge (Chromium + legacy EdgeHTML) cache, all users
-    'Remove OneDrive Accounts'   = { Remove-OneDriveAccounts }               # OneDrive.exe /reset + registry, Business+Personal
+    'Remove OneDrive Accounts'   = { Remove-OneDriveAccount }               # OneDrive.exe /reset + registry, Business+Personal
     'Clear User Temp'            = { Remove-UserCache }                      # %LOCALAPPDATA%\Temp, all users
     'Clear WER'                  = { Clear-WER }                             # Windows Error Reporting queue/archive
-    'Clear Diagnostic Artifacts' = { Clear-DiagnosticArtifacts }             # Crash dumps, Timeline, Sticky Notes, notifications
+    'Clear Diagnostic Artifacts' = { Clear-DiagnosticArtifact }             # Crash dumps, Timeline, Sticky Notes, notifications
     'Clear Windows Temp'         = { Clear-WindowsTemp }                     # System Temp + WU component reset
-    'Clear Network Credentials'  = { Clear-NetworkCredentials }              # Credential Manager vault (cmdkey), current user
-    'Clear Wi-Fi Profiles'       = { Clear-WifiProfiles }                    # Saved Wi-Fi SSIDs/passwords, machine-wide
+    'Clear Network Credentials'  = { Clear-NetworkCredential }              # Credential Manager vault (cmdkey), current user
+    'Clear Wi-Fi Profiles'       = { Clear-WifiProfile }                    # Saved Wi-Fi SSIDs/passwords, machine-wide
     'Clear Network History'      = { Clear-NetworkHistory }                  # NetworkList profile/signature history
-    'Clear Proxy Settings'       = { Clear-ProxySettings }                   # WinHTTP + per-user IE/WinINET proxy
-    'Clear VPN Connections'      = { Clear-VpnConnections }                  # All-user VPN connection profiles
+    'Clear Proxy Settings'       = { Clear-ProxySetting }                   # WinHTTP + per-user IE/WinINET proxy
+    'Clear VPN Connections'      = { Clear-VpnConnection }                  # All-user VPN connection profiles
     'Clear Device History'       = { Clear-DeviceHistory }                   # USBSTOR + Bluetooth paired-device registry
-    'Clear Autologon Creds'      = { Clear-AutologonCredentials }            # Plaintext Winlogon autologon password, if set
-    'Remove Network Printers'    = { Remove-NetworkPrinters }                # Network/remote printer connections
+    'Clear Autologon Creds'      = { Clear-AutologonCredential }            # Plaintext Winlogon autologon password, if set
+    'Remove Network Printers'    = { Remove-NetworkPrinter }                # Network/remote printer connections
     'Clear RDP History'          = { Clear-RDPHistory }                     # Saved RDP server list + MRU, all users
     'Clear Clipboard History'    = { Clear-ClipboardHistory }                # Persisted Clipboard History files, all users
     'Clear Print Queue'          = { Clear-PrintQueue }                      # Queued print jobs, graceful then forced
@@ -3692,24 +3770,24 @@ $script:AllTasks = [ordered]@{
     'Clear Office History'       = { Clear-OfficeHistory }                   # Office File/Place/User MRU, all users
     'Sign Out of Office Apps'    = { Clear-OfficeSignIn }                    # Office identity/token cache, all users
     'Clear Adobe History'        = { Clear-AdobeHistory }                    # Adobe/Bluebeam recent-file MRU + cache
-    'Clear Sync Client Caches'   = { Clear-SyncClientCaches }                # Box/Dropbox/Google Drive app cache/sign-in
-    'Clear User Certificates'    = { Clear-UserCertificates }                # Personal cert store + private keys, all users
-    'Clear Dev Credentials'      = { Clear-DevCredentials }                  # SSH keys, .gitconfig, Git Credential Manager
-    'Clear Mapped Drives'        = { Clear-MappedDrives }                    # Persisted network drive mappings, all users
-    'Clear Meeting App Caches'   = { Clear-MeetingAppCaches }                # Zoom/WebEx local cache
+    'Clear Sync Client Caches'   = { Clear-SyncClientCache }                # Box/Dropbox/Google Drive app cache/sign-in
+    'Clear User Certificates'    = { Clear-UserCertificate }                # Personal cert store + private keys, all users
+    'Clear Dev Credentials'      = { Clear-DevCredential }                  # SSH keys, .gitconfig, Git Credential Manager
+    'Clear Mapped Drives'        = { Clear-MappedDrive }                    # Persisted network drive mappings, all users
+    'Clear Meeting App Caches'   = { Clear-MeetingAppCache }                # Zoom/WebEx local cache
     'Clear Misc App Data'        = { Clear-MiscAppData }                     # Phone Link, Mail/Calendar, OneNote, Skype
-    'Remove Scheduled Tasks'     = { Remove-NonMicrosoftScheduledTasks }     # Tasks outside \Microsoft\ task-path
-    'Clear Event Logs'           = { Clear-EventLogs }                       # Every non-empty event log, classic + modern
+    'Remove Scheduled Tasks'     = { Remove-NonMicrosoftScheduledTask }     # Tasks outside \Microsoft\ task-path
+    'Clear Event Logs'           = { Clear-DeviceEventLog }                       # Every non-empty event log, classic + modern
     'Remove Teams Profile'       = { Remove-TeamsProfile }                   # Teams v1+v2 data, all users
     'Remove Outlook Profile'     = { Remove-OutlookProfile }                 # Outlook profile registry, OST/NK2, PST (+backup)
-    'Clear Pinned Items'         = { Clear-PinnedItems }                     # Jump Lists, Recent Items, Quick Access pins
-    'Wipe Personal Files'        = { Remove-UserPersonalFiles }              # Desktop/Documents/Downloads/Pictures/Videos/Music
+    'Clear Pinned Items'         = { Clear-PinnedItem }                     # Jump Lists, Recent Items, Quick Access pins
+    'Wipe Personal Files'        = { Remove-UserPersonalFile }              # Desktop/Documents/Downloads/Pictures/Videos/Music
     'Clear Recycle Bin'          = { Invoke-RecycleBinCleanup }              # Clear-RecycleBin cmdlet, all drives/users
-    'Flush Network Caches'       = { Clear-NetworkCaches }                   # DNS (cmdlet) + ARP (cmdlet) + NetBIOS (nbtstat)
+    'Flush Network Caches'       = { Clear-NetworkCache }                   # DNS (cmdlet) + ARP (cmdlet) + NetBIOS (nbtstat)
     'Reset Search Index'         = { Clear-SearchIndex }                     # Windows.edb (rebuilds automatically)
     'Disk Cleanup'               = { Invoke-CleanMgrAutomation }             # CleanMgr.exe /sagerun across fixed categories
     'DISM Component Cleanup'     = { Invoke-DISMCleanup }                    # WinSxS component store cleanup
-    'Clear Setup Logs'           = { Clear-SetupLogs }                       # Panther/CBS/setupapi logs
+    'Clear Setup Logs'           = { Clear-SetupLog }                       # Panther/CBS/setupapi logs
     'Clear Amcache/ShimCache'    = { Clear-AmcacheAndShimCache }             # Application execution history
     'Clear Pagefile/Hibernation' = { Clear-PagefileAndHibernation }          # Clear-at-shutdown flag + hiberfil.sys regen
     'Clear Windows Recall'       = { Clear-WindowsRecall }                   # Copilot+ snapshot history, no-op on non-Copilot+ hardware
@@ -3733,7 +3811,7 @@ $script:AllTasks = [ordered]@{
 # names are recorded in $script:TrailingTasks so Main can explicitly defer
 # running them until after PST relocation has already happened - see the
 # comment there for why this split exists.
-$script:AllTasks['Clear Shadow Copies'] = { Clear-ShadowCopies }
+$script:AllTasks['Clear Shadow Copies'] = { Clear-ShadowCopy }
 $script:AllTasks['Reset USN Journal']   = { Clear-UsnJournal }
 if ($SecureWipe) {
     $script:AllTasks['Secure Free-Space Wipe'] = { Invoke-SecureFreeSpaceWipe }
