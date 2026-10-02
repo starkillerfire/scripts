@@ -124,6 +124,7 @@ function Register-AppEventSource {
         Ensures the Windows Event Log source exists. Creates it if not.
         Uses the .NET API directly for PS 5.1 and PS 7+ compatibility.
     #>
+    [OutputType([void])]
     param([string]$Source)
     try {
         if (-not [System.Diagnostics.EventLog]::SourceExists($Source)) {
@@ -152,6 +153,7 @@ function Write-AppEvent {
         1007 - Script completed successfully
         1008 - Script completed with one or more failures
     #>
+    [OutputType([void])]
     param(
         [string]$Message,
         [System.Diagnostics.EventLogEntryType]$EntryType = 'Information',
@@ -173,6 +175,7 @@ function Invoke-LogRotation {
         Deletes the oldest log files matching Filter when count exceeds KeepCount.
         Files are sorted by LastWriteTime; the newest KeepCount are retained.
     #>
+    [OutputType([void])]
     param(
         [string]$Path,
         [string]$Filter,
@@ -203,6 +206,9 @@ function Test-PendingReboot {
         Returns $true if the system has a pending reboot from any common source.
         A pending reboot can cause MSI operations to fail or behave unexpectedly.
     #>
+    [OutputType([bool])]
+    param()
+
     # Component Based Servicing (Windows Updates / features)
     if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
         return $true
@@ -235,6 +241,9 @@ function Test-MSIBusy {
         a different thing from confirming it's not busy and shouldn't be
         reported to the operator as if it were.
     #>
+    [OutputType([string])]
+    param()
+
     try {
         $mutex = [System.Threading.Mutex]::OpenExisting('Global\_MSIExecute')
         $mutex.Dispose()

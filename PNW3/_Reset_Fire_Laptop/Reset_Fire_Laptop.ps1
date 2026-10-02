@@ -697,6 +697,11 @@ param(
     # ordinary Remove-Item in general) is only unlinked, not overwritten, and
     # stays recoverable with undelete tools until that disk space gets reused.
     [switch]$SecureWipe,
+    # Reason this laptop is being reset, logged once alongside the target-
+    # machine banner below for after-the-fact audit. Optional, defaulting to
+    # a placeholder, so existing unattended invocations that don't pass it
+    # keep working unchanged.
+    [string]$Justification = '(none provided)',
     # Internal use only - set automatically when this script relaunches
     # itself elevated. Do not pass this by hand. It caps self-elevation at
     # one attempt: if the relaunched copy still isn't Administrator, that
@@ -868,6 +873,12 @@ function Test-OnRemovableMedia {
     catch { return $false }
 }
 $script:RunningFromRemovableMedia = Test-OnRemovableMedia -Path $PSScriptRoot
+if ($script:RunningFromRemovableMedia) {
+    # This thumbdrive gets reused across many laptops and now accumulates the
+    # transcript log (and -BackupPst output) from every one of them. Advisory
+    # only - not checked programmatically here.
+    Write-Warning "This script is running from removable media that collects a log (and possibly PST backups) from every machine it's run against. Confirm this drive itself is BitLocker-encrypted before taking it between machines."
+}
 if ($BackupPst -and -not $script:RunningFromRemovableMedia) {
     # -BackupPst's only off-machine destination is the thumbdrive this script
     # is itself run from (Move-ArtifactOffMachine, below) - run from anywhere
@@ -3647,6 +3658,7 @@ Write-Host "  TARGET MACHINE" -ForegroundColor Cyan
 Write-Host "  Computer Name : $env:COMPUTERNAME" -ForegroundColor White
 Write-Host "  Serial Number : $(if ($serial) { $serial } else { 'Unknown' })" -ForegroundColor White
 Write-Host "  Running As    : $env:USERDOMAIN\$env:USERNAME" -ForegroundColor White
+Write-Host "  Justification : $Justification" -ForegroundColor White
 Write-Host "$('=' * 60)" -ForegroundColor Cyan
 
 # Single source of truth for both the GUI task-selection checklist below and

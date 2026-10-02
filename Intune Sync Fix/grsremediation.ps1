@@ -241,8 +241,29 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 # Start Logging
+$logDir = "C:\Windows\Logs"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-Start-Transcript "C:\Windows\Logs\App_Failure_Remediation_$timestamp.log"
+$logPath = Join-Path $logDir "App_Failure_Remediation_$timestamp.log"
+
+# This transcript logs AD usernames next to failing AppIDs and was previously
+# left to accumulate forever with the directory's default (broadly readable)
+# ACL. Purge anything older than 30 days before adding to the pile, then
+# lock the new file down below once it exists.
+try {
+    Get-ChildItem -Path $logDir -Filter 'App_Failure_Remediation_*.log' -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+} catch {
+    Write-Warning "Could not clean up old remediation logs in '$logDir': $($_.Exception.Message)"
+}
+
+Start-Transcript $logPath
+
+try {
+    icacls $logPath /inheritance:r /grant:r '*S-1-5-32-544:F' 'SYSTEM:F' | Out-Null
+} catch {
+    Write-Warning "Could not lock down ACL on log file '$logPath': $($_.Exception.Message)"
+}
 
 try {
     # Get the failed Win32 app states

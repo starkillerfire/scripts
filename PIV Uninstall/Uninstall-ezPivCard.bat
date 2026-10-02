@@ -47,6 +47,16 @@ REM       open until the user presses a key (see "pause" below).
 REM ----------------------------------------------------------------
 net session >nul 2>&1
 if !errorlevel! neq 0 (
+    REM A single quote in a forwarded argument would close the single-quoted
+    REM -ArgumentList string below early and run as independent PowerShell
+    REM code in this non-elevated process, before elevation even happens.
+    REM Reject any such argument outright rather than trying to escape it.
+    echo(%*| findstr /C:"'" >nul
+    if !errorlevel! equ 0 (
+        echo [ERROR] Arguments contain an illegal single-quote character and were rejected.
+        exit /b 1
+    )
+
     echo [INFO] Administrator rights required. Requesting elevation...
     powershell -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c \"\"%~f0\"\" %*' -Verb RunAs -Wait"
     echo [INFO] Elevated session finished. Check the elevated window for results.

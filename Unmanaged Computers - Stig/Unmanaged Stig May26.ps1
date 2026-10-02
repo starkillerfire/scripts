@@ -86,12 +86,13 @@ param(
     # signature (XMLDSig) - a different mechanism from Authenticode, since
     # that doesn't apply to XML content. This script drives real
     # registry/audit-policy changes from whatever SCAP XML it's given, so an
-    # unsigned or tampered file placed beside it would otherwise be trusted
-    # implicitly. Pass this to hard-fail when the loaded SCAP XML is missing
-    # a signature or the certificate chain doesn't validate, instead of just
-    # warning.
+    # unsigned or tampered file placed beside it is hard-failed by default
+    # instead of being trusted implicitly. Pass this switch to downgrade
+    # that hard failure to a warning and proceed anyway when the loaded
+    # SCAP XML is missing a signature or the certificate chain doesn't
+    # validate.
     [Parameter(Mandatory = $false)]
-    [switch]$RequireSignedScap,
+    [switch]$AllowUnsignedScap,
 
     [Parameter(Mandatory = $false)]
     [string]$OrgSettingsPath,
@@ -234,6 +235,13 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipCertificateReport,
+
+    # Reason this run is being performed, logged once at script start for
+    # after-the-fact audit alongside this run's computer/operator identity.
+    # Optional, defaulting to a placeholder, so existing unattended
+    # invocations that don't pass it keep working unchanged.
+    [Parameter(Mandatory = $false)]
+    [string]$Justification = '(none provided)',
 
     # Internal marker set by the elevation relaunch below when the original,
     # non-elevated invocation had -StartupPin bound. SecureString parameters
@@ -510,6 +518,13 @@ function Test-SafeRegistryTarget {
     $normalized = $Key.Replace('/', '\').Trim('\')
     $lower = $normalized.ToLowerInvariant()
 
+    # Reject any '..' path segment at validation time. The registry provider
+    # treats '..' as a literal character sequence rather than a traversal
+    # operator, so this isn't exploitable today - but there's no reason to
+    # let a value shaped like a traversal attempt past validation just
+    # because the current provider happens not to act on it.
+    if ($lower -match '(^|\\)\.\.(\\|$)') { return $false }
+
     # Do not try to remediate OS identity/build/inventory keys. These are evidence checks, not hardening knobs.
     if ($lower -like 'software\microsoft\windows nt\currentversion*' -and $lower -notlike '*\winlogon*') { return $false }
     if ($lower -like 'software\microsoft\windows\currentversion\uninstall*') { return $false }
@@ -549,7 +564,14 @@ function Test-SafeRegistryTarget {
     )
 
     foreach ($prefix in $safePrefixes) {
-        if ($lower.StartsWith($prefix)) { return $true }
+        # Trim the trailing '\' each prefix is written with above so it can
+        # be compared both as an exact match and as a true parent path - a
+        # bare StartsWith() would also accept a sibling key that merely
+        # shares the prefix's text (e.g. '...\LsaEvilBranch\...' against the
+        # allow-listed '...\lsa') since that's a text match with no path
+        # separator boundary.
+        $trimmedPrefix = $prefix.TrimEnd('\')
+        if (($lower -eq $trimmedPrefix) -or $lower.StartsWith($trimmedPrefix + '\')) { return $true }
     }
     return $false
 }
@@ -918,6 +940,11 @@ function Export-StigBitLockerRecoveryKey {
         $lines.Add('')
     }
     Set-Content -Path $keyPath -Value $lines -Encoding UTF8
+    try {
+        Invoke-NativeCommand -FilePath 'icacls' -ArgumentList @($keyPath, '/inheritance:r', '/grant:r', '*S-1-5-32-544:F', 'SYSTEM:F') | Out-Null
+    } catch {
+        Write-Warning "Could not lock down ACL on recovery key file '$keyPath': $($_.Exception.Message)"
+    }
 
     Write-Host ''
     Write-Host ('*' * 90) -ForegroundColor Red
@@ -1859,13 +1886,13 @@ function Import-ScapContent {
     $sigResult = Test-ScapXmlSignature -Path $Path
     if ($sigResult.Valid) {
         Write-Host "SCAP XML signature: VERIFIED - $($sigResult.Message)" -ForegroundColor Green
-    } elseif ($RequireSignedScap) {
-        throw "SCAP XML failed signature verification and -RequireSignedScap was specified: $($sigResult.Message)"
+    } elseif (-not $AllowUnsignedScap) {
+        throw "SCAP XML failed signature verification and -AllowUnsignedScap was not specified: $($sigResult.Message)"
     } elseif ($sigResult.Signed) {
         Write-Host "WARNING: SCAP XML has a signature that failed verification: $($sigResult.Message)" -ForegroundColor Red
-        Write-Host "Proceeding without -RequireSignedScap, but treat this file as unverified." -ForegroundColor Red
+        Write-Host "Proceeding because -AllowUnsignedScap was specified, but treat this file as unverified." -ForegroundColor Red
     } else {
-        Write-Host "WARNING: SCAP XML is not digitally signed. Proceeding, but this file's origin/integrity is unverified." -ForegroundColor Yellow
+        Write-Host "WARNING: SCAP XML is not digitally signed. Proceeding because -AllowUnsignedScap was specified, but this file's origin/integrity is unverified." -ForegroundColor Yellow
     }
 
     Write-Section "Loading SCAP XML: $Path"
@@ -3012,6 +3039,8 @@ New-StigDirectory -Path $ReportRoot
 
 $script:TranscriptPath = Join-Path (Join-Path $env:ProgramData 'PowerSTIG') ("Win11_STIG_Remediation_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
 Start-StigTranscript -Path $script:TranscriptPath
+
+Write-Host "Computer: $env:COMPUTERNAME | Operator: $([Security.Principal.WindowsIdentity]::GetCurrent().Name) | Justification: $Justification" -ForegroundColor Cyan
 
 try {
     Clear-OrphanedRegistryHives
