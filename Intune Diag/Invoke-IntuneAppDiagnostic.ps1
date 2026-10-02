@@ -80,10 +80,16 @@ $registryReadErrors = $null
 
 if (Test-Path $win32AppsKeyPath) {
     # -Recurse against this tree can hit subkeys ACL'd to SYSTEM only (per-
-    # user report-cache keys, mainly). -ErrorAction SilentlyContinue quiets
-    # the console, but -ErrorVariable still captures how many were skipped
-    # so an incomplete scan is reported as incomplete instead of looking
-    # like a clean "nothing failed."
+    # user report-cache keys, mainly). The registry provider still prints
+    # its own access-denied error for each one straight to the console,
+    # ignoring -ErrorAction SilentlyContinue and 2>$null - that was tried
+    # and traded away completeness for quiet (scoping $ErrorActionPreference
+    # around the call made Get-ChildItem abort the whole enumeration on the
+    # first denied subkey instead of skipping past it). So the message is
+    # left visible: it's an accurate, per-subkey diagnostic, not noise worth
+    # losing results over. -ErrorVariable still captures how many were
+    # skipped so an incomplete scan is reported as incomplete instead of
+    # looking like a clean "nothing failed."
     $appSubKeys = Get-ChildItem -Path $win32AppsKeyPath -Recurse -ErrorAction SilentlyContinue -ErrorVariable registryReadErrors
 
     if ($registryReadErrors.Count -gt 0) {
