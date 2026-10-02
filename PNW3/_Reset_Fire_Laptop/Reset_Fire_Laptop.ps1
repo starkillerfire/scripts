@@ -848,7 +848,7 @@ $UsersBase = if ($profilesDirRaw) { [Environment]::ExpandEnvironmentVariables($p
 # regenerate it fresh on next launch, same as everything else this regex targets.
 $script:BrowserDataRegex = 'Archived History|Cache|Cookies|Extension State|File System|History|IndexedDB|Local Extension Settings|Local State|Login Data|Service Worker|Storage|Sync|Top Sites|Visited Links|Web Data'
 
-function Test-OnRemovableMedia {
+function Test-OnRemovableDisk {
     <#
     .SYNOPSIS
         Tests whether a path is on removable (thumbdrive) media.
@@ -872,7 +872,7 @@ function Test-OnRemovableMedia {
     }
     catch { return $false }
 }
-$script:RunningFromRemovableMedia = Test-OnRemovableMedia -Path $PSScriptRoot
+$script:RunningFromRemovableMedia = Test-OnRemovableDisk -Path $PSScriptRoot
 if ($script:RunningFromRemovableMedia) {
     # This thumbdrive gets reused across many laptops and now accumulates the
     # transcript log (and -BackupPst output) from every one of them. Advisory
@@ -925,7 +925,7 @@ function Move-ArtifactOffMachine {
         Relocates a file or folder off the machine being wiped, or purges it.
     .DESCRIPTION
         If this script is running from removable media (per $script:RunningFromRemovableMedia,
-        set once at startup by Test-OnRemovableMedia), copies $SourcePath to
+        set once at startup by Test-OnRemovableDisk), copies $SourcePath to
         <thumbdrive>\Collected\<DestFolderName> and only deletes $SourcePath from the target
         machine once that copy has actually succeeded - if the copy fails (drive full,
         unplugged, permissions), $SourcePath is left in place rather than deleted with no

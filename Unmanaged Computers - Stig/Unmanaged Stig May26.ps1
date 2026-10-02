@@ -521,9 +521,18 @@ function Convert-OvalDataTypeToRegistryType {
 function Test-SafeRegistryTarget {
     param(
         [Parameter(Mandatory)][string]$Hive,
-        [Parameter(Mandatory)][string]$Key,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Key
     )
+
+    # Every entry in $safePrefixes below is an HKLM-only subtree
+    # ('system\...', 'software\...' with no hive prefix) - this allowlist
+    # was never meant to cover HKCU. Convert-RegistryPathFromOval resolves
+    # both HKLM and HKCU, so without this check a SCAP file specifying
+    # HKEY_CURRENT_USER with a Key that happens to match an allowed HKLM
+    # prefix (e.g. 'SOFTWARE\Policies\...') would pass validation meant for
+    # a completely different hive.
+    $normalizedHive = $Hive.Trim().ToUpperInvariant()
+    if ($normalizedHive -ne 'HKLM' -and $normalizedHive -ne 'HKEY_LOCAL_MACHINE') { return $false }
 
     $normalized = $Key.Replace('/', '\').Trim('\')
     $lower = $normalized.ToLowerInvariant()
@@ -2154,7 +2163,7 @@ function Get-ScapDrivenRegistryAction {
             $hive = $hiveNode.InnerText
             $key = $keyNode.InnerText
             $name = $nameNode.InnerText
-            if (-not (Test-SafeRegistryTarget -Hive $hive -Key $key -Name $name)) { continue }
+            if (-not (Test-SafeRegistryTarget -Hive $hive -Key $key)) { continue }
 
             $stateNodes = $test.SelectNodes("./*[local-name()='state']")
             foreach ($stateNode in $stateNodes) {
