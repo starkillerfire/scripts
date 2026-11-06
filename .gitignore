@@ -1,0 +1,14 @@
+# Remote-update artifacts
+*.ps1.bak
+*.psm1.bak
+*.bat.bak
+*.update.json
+*.update.pending
+*.download.ps1
+*.download.psm1
+*.download.bat
+*.update.json.*.tmp
+*.update.json.*.previous
+*.update.pending.*.previous
+maintenance/results/
+
