@@ -1,0 +1,6 @@
+# Paths kept on GitLab but left out of the public GitHub mirror.
+# One file or folder per line, relative to the repository root.
+# Used by maintenance/Publish-GitHubMirror.ps1, the pre-commit check and the tests.
+PNW3/IT priorties.xlsx
+PNW3/Ninite Installer.exe
+Unmanaged Computers - Stig/scc-5.14_Windows_bundle

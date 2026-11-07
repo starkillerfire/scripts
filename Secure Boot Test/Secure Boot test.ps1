@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+
 <#
 .SYNOPSIS
     Checks and, on Dell hardware, remediates Secure Boot / UEFI CA 2023 servicing state
@@ -205,7 +206,7 @@ $LogPath = Join-Path $env:ProgramData ("SecureBoot-UEFICA2023-v{0}-{1}.log" -f $
 # ----------------------------
 # Logging / utility
 # ----------------------------
-function Write-Log {
+function Write-ScriptLog {
     param(
         [Parameter(Mandatory = $true)][string]$Message,
         [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO'
@@ -227,7 +228,7 @@ function Start-WarnedRestart {
     if ($PSCmdlet.ShouldProcess('local computer', 'Schedule restart in 5 minutes via shutdown.exe')) {
         shutdown /r /t 300 /c "Secure Boot remediation requires a restart. This computer will restart in 5 minutes. Save your work now."
         if ($LASTEXITCODE -ne 0) {
-            Write-Log ("shutdown.exe failed to schedule the restart (exit {0})." -f $LASTEXITCODE) 'WARN'
+            Write-ScriptLog ("shutdown.exe failed to schedule the restart (exit {0})." -f $LASTEXITCODE) 'WARN'
         }
     }
 }
@@ -329,7 +330,7 @@ function Get-SecureBootSnapshot {
         }
     }
     catch {
-        Write-Log ("Could not read Secure Boot UEFI db variable: {0}" -f $_.Exception.Message) 'WARN'
+        Write-ScriptLog ("Could not read Secure Boot UEFI db variable: {0}" -f $_.Exception.Message) 'WARN'
     }
 
     [pscustomobject]@{
@@ -363,7 +364,7 @@ function Get-SecureBootEvent {
         return $events
     }
     catch {
-        Write-Log ("Could not read Secure Boot events: {0}" -f $_.Exception.Message) 'WARN'
+        Write-ScriptLog ("Could not read Secure Boot events: {0}" -f $_.Exception.Message) 'WARN'
         return @()
     }
 }
@@ -371,14 +372,14 @@ function Get-SecureBootEvent {
 function Write-SecureBootEventsToLog {
     $events = Get-SecureBootEvent
     if (-not $events -or $events.Count -eq 0) {
-        Write-Log 'No recent TPM-WMI Secure Boot events found.'
+        Write-ScriptLog 'No recent TPM-WMI Secure Boot events found.'
         return
     }
 
-    Write-Log 'Recent TPM-WMI Secure Boot events:'
+    Write-ScriptLog 'Recent TPM-WMI Secure Boot events:'
     foreach ($evt in $events) {
         $msg = ($evt.Message -replace '\s+', ' ').Trim()
-        Write-Log ("EventID={0} Time={1} Level={2} Message={3}" -f $evt.Id, $evt.TimeCreated, $evt.LevelDisplayName, $msg)
+        Write-ScriptLog ("EventID={0} Time={1} Level={2} Message={3}" -f $evt.Id, $evt.TimeCreated, $evt.LevelDisplayName, $msg)
     }
 }
 
@@ -405,17 +406,17 @@ function Get-DellProviderModuleName {
 function Import-DellProvider {
     $name = Get-DellProviderModuleName
     if (-not $name) {
-        Write-Log 'Dell BIOS PowerShell provider not installed.' 'WARN'
+        Write-ScriptLog 'Dell BIOS PowerShell provider not installed.' 'WARN'
         return $false
     }
 
     try {
         Import-Module $name -ErrorAction Stop
-        Write-Log ("Imported Dell BIOS provider module: {0}" -f $name)
+        Write-ScriptLog ("Imported Dell BIOS provider module: {0}" -f $name)
         return $true
     }
     catch {
-        Write-Log ("Failed to import Dell BIOS provider: {0}" -f $_.Exception.Message) 'WARN'
+        Write-ScriptLog ("Failed to import Dell BIOS provider: {0}" -f $_.Exception.Message) 'WARN'
         return $false
     }
 }
@@ -434,7 +435,7 @@ function Test-DellAdminPasswordSet {
         return $null
     }
     catch {
-        Write-Log ("Unable to determine Dell BIOS admin password state: {0}" -f $_.Exception.Message) 'WARN'
+        Write-ScriptLog ("Unable to determine Dell BIOS admin password state: {0}" -f $_.Exception.Message) 'WARN'
         return $null
     }
 }
@@ -467,13 +468,13 @@ function Invoke-Cctk {
         }
     }
 
-    Write-Log ("Running CCTK: {0} {1}" -f $cctk, ($Arguments -join ' '))
+    Write-ScriptLog ("Running CCTK: {0} {1}" -f $cctk, ($Arguments -join ' '))
     $output = & $cctk @Arguments 2>&1 | Out-String
     $code = $LASTEXITCODE
 
-    Write-Log ("CCTK exit code: {0}" -f $code)
+    Write-ScriptLog ("CCTK exit code: {0}" -f $code)
     if ($output) {
-        Write-Log ("CCTK output: {0}" -f (($output -replace '\s+', ' ').Trim()))
+        Write-ScriptLog ("CCTK output: {0}" -f (($output -replace '\s+', ' ').Trim()))
     }
 
     return [pscustomobject]@{
@@ -514,13 +515,13 @@ function Disable-DellLegacyOrom {
         $cctk = Invoke-Cctk -Arguments @('--legacyorom=disable')
         if ($cctk.Found) {
             if ($cctk.ExitCode -eq 0) {
-                Write-Log 'Legacy Option ROM disable command issued successfully.'
+                Write-ScriptLog 'Legacy Option ROM disable command issued successfully.'
                 return $true
             }
             else {
                 $meaning = Get-CctkExitMeaning -Code $cctk.ExitCode
                 if ($meaning) {
-                    Write-Log ("CCTK legacyorom result: {0}" -f $meaning) 'WARN'
+                    Write-ScriptLog ("CCTK legacyorom result: {0}" -f $meaning) 'WARN'
                 }
             }
         }
@@ -541,7 +542,7 @@ function Disable-DellLegacyOrom {
                 if (Test-Path $path) {
                     if ($PSCmdlet.ShouldProcess($path, "Set Dell BIOS attribute to 'Disabled'")) {
                         Set-Item -Path $path -Value 'Disabled' -ErrorAction Stop
-                        Write-Log ("Set Dell BIOS attribute: {0} = Disabled" -f $path)
+                        Write-ScriptLog ("Set Dell BIOS attribute: {0} = Disabled" -f $path)
                         $changed = $true
                     }
                     break
@@ -550,7 +551,7 @@ function Disable-DellLegacyOrom {
         }
     }
     catch {
-        Write-Log ("Provider fallback for Legacy Option ROM failed: {0}" -f $_.Exception.Message) 'WARN'
+        Write-ScriptLog ("Provider fallback for Legacy Option ROM failed: {0}" -f $_.Exception.Message) 'WARN'
     }
 
     return $changed
@@ -569,14 +570,14 @@ function Enable-DellSecureBoot {
             if (Test-Path 'DellSmbios:\SecureBoot\SecureBoot') {
                 if ($PSCmdlet.ShouldProcess('DellSmbios:\SecureBoot\SecureBoot', "Set Dell BIOS attribute to 'Enabled'")) {
                     Set-Item -Path 'DellSmbios:\SecureBoot\SecureBoot' -Value 'Enabled' -ErrorAction Stop
-                    Write-Log 'Set Dell BIOS attribute: DellSmbios:\SecureBoot\SecureBoot = Enabled'
+                    Write-ScriptLog 'Set Dell BIOS attribute: DellSmbios:\SecureBoot\SecureBoot = Enabled'
                     return $true
                 }
             }
         }
     }
     catch {
-        Write-Log ("Dell provider Secure Boot enable failed: {0}" -f $_.Exception.Message) 'WARN'
+        Write-ScriptLog ("Dell provider Secure Boot enable failed: {0}" -f $_.Exception.Message) 'WARN'
     }
 
     # CCTK fallback
@@ -584,13 +585,13 @@ function Enable-DellSecureBoot {
         $cctk = Invoke-Cctk -Arguments @('--secureboot=enable')
         if ($cctk.Found) {
             if ($cctk.ExitCode -eq 0) {
-                Write-Log 'CCTK Secure Boot enable command issued successfully.'
+                Write-ScriptLog 'CCTK Secure Boot enable command issued successfully.'
                 return $true
             }
             else {
                 $meaning = Get-CctkExitMeaning -Code $cctk.ExitCode
                 if ($meaning) {
-                    Write-Log ("CCTK secureboot result: {0}" -f $meaning) 'WARN'
+                    Write-ScriptLog ("CCTK secureboot result: {0}" -f $meaning) 'WARN'
                 }
             }
         }
@@ -622,7 +623,7 @@ function Start-SecureBootTask {
 
     if ($PSCmdlet.ShouldProcess('\Microsoft\Windows\PI\Secure-Boot-Update', 'Start scheduled task')) {
         Start-ScheduledTask -InputObject $task
-        Write-Log 'Started scheduled task: \Microsoft\Windows\PI\Secure-Boot-Update'
+        Write-ScriptLog 'Started scheduled task: \Microsoft\Windows\PI\Secure-Boot-Update'
     }
 }
 
@@ -638,7 +639,7 @@ function Set-AvailableUpdates5944 {
         }
 
         New-ItemProperty -Path $rootPath -Name 'AvailableUpdates' -PropertyType DWord -Value 0x5944 -Force | Out-Null
-        Write-Log 'Set HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates = 0x5944'
+        Write-ScriptLog 'Set HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates = 0x5944'
     }
 }
 
@@ -650,74 +651,74 @@ if (-not (Test-IsAdmin)) {
 }
 
 New-Item -ItemType File -Path $LogPath -Force | Out-Null
-Write-Log ("Script version {0}" -f $ScriptVersion)
-Write-Log ("Log path: {0}" -f $LogPath)
+Write-ScriptLog ("Script version {0}" -f $ScriptVersion)
+Write-ScriptLog ("Log path: {0}" -f $LogPath)
 
 $cs   = Get-CimInstance -ClassName Win32_ComputerSystem
 $bios = Get-CimInstance -ClassName Win32_BIOS
 
-Write-Log ("Manufacturer : {0}" -f $cs.Manufacturer)
-Write-Log ("Model        : {0}" -f $cs.Model)
-Write-Log ("BIOS Version : {0}" -f (($bios.SMBIOSBIOSVersion | Select-Object -First 1)))
+Write-ScriptLog ("Manufacturer : {0}" -f $cs.Manufacturer)
+Write-ScriptLog ("Model        : {0}" -f $cs.Model)
+Write-ScriptLog ("BIOS Version : {0}" -f (($bios.SMBIOSBIOSVersion | Select-Object -First 1)))
 
 $state = Get-SecureBootSnapshot
 
-Write-Log ("FirmwareType              : {0}" -f $state.FirmwareType)
-Write-Log ("SecureBootEnabled         : {0}" -f $state.SecureBootEnabled)
-Write-Log ("AvailableUpdates          : {0}" -f $state.AvailableUpdatesHex)
-Write-Log ("UEFICA2023Status          : {0}" -f $state.UEFICA2023Status)
-Write-Log ("UEFICA2023Error           : {0}" -f $state.UEFICA2023ErrorHex)
-Write-Log ("UEFICA2023ErrorText       : {0}" -f $state.UEFICA2023ErrorText)
-Write-Log ("UEFICA2023ErrorEvent      : {0}" -f $state.UEFICA2023ErrorEvent)
-Write-Log ("WindowsUEFICA2023Capable  : {0}" -f $state.WindowsUEFICA2023Capable)
-Write-Log ("BucketHash                : {0}" -f $state.BucketHash)
-Write-Log ("ConfidenceLevel           : {0}" -f $state.ConfidenceLevel)
-Write-Log ("DB contains CA 2023       : {0}" -f $state.DbHas2023)
+Write-ScriptLog ("FirmwareType              : {0}" -f $state.FirmwareType)
+Write-ScriptLog ("SecureBootEnabled         : {0}" -f $state.SecureBootEnabled)
+Write-ScriptLog ("AvailableUpdates          : {0}" -f $state.AvailableUpdatesHex)
+Write-ScriptLog ("UEFICA2023Status          : {0}" -f $state.UEFICA2023Status)
+Write-ScriptLog ("UEFICA2023Error           : {0}" -f $state.UEFICA2023ErrorHex)
+Write-ScriptLog ("UEFICA2023ErrorText       : {0}" -f $state.UEFICA2023ErrorText)
+Write-ScriptLog ("UEFICA2023ErrorEvent      : {0}" -f $state.UEFICA2023ErrorEvent)
+Write-ScriptLog ("WindowsUEFICA2023Capable  : {0}" -f $state.WindowsUEFICA2023Capable)
+Write-ScriptLog ("BucketHash                : {0}" -f $state.BucketHash)
+Write-ScriptLog ("ConfidenceLevel           : {0}" -f $state.ConfidenceLevel)
+Write-ScriptLog ("DB contains CA 2023       : {0}" -f $state.DbHas2023)
 
 Write-SecureBootEventsToLog
 
 # Success / compliant states
 if ($state.DbHas2023 -or $state.UEFICA2023Status -eq 'Updated' -or $state.WindowsUEFICA2023Capable -ge 1) {
-    Write-Log 'UEFI CA 2023 already present / updated. Nothing to do.'
+    Write-ScriptLog 'UEFI CA 2023 already present / updated. Nothing to do.'
     exit 0
 }
 
 # Hard prereq gates
 if ($state.FirmwareType -ne 'UEFI') {
-    Write-Log 'System is not booted in UEFI mode. Secure Boot remediation cannot continue.' 'ERROR'
+    Write-ScriptLog 'System is not booted in UEFI mode. Secure Boot remediation cannot continue.' 'ERROR'
     exit 1
 }
 
 $task = Get-SecureBootTask
 if (-not $task) {
-    Write-Log 'The Microsoft Secure-Boot-Update scheduled task is missing. Install the current supported Windows update level first.' 'ERROR'
+    Write-ScriptLog 'The Microsoft Secure-Boot-Update scheduled task is missing. Install the current supported Windows update level first.' 'ERROR'
     exit 1
 }
 
 # Dell / BIOS remediation stage
 if (-not $state.SecureBootEnabled) {
-    Write-Log 'Secure Boot is currently disabled.' 'WARN'
+    Write-ScriptLog 'Secure Boot is currently disabled.' 'WARN'
 
     if ($cs.Manufacturer -notmatch 'Dell') {
-        Write-Log 'Non-Dell system detected. Enable Secure Boot in firmware manually, then rerun the script.' 'ERROR'
+        Write-ScriptLog 'Non-Dell system detected. Enable Secure Boot in firmware manually, then rerun the script.' 'ERROR'
         exit 1
     }
 
     if ($SkipDellBiosChange) {
-        Write-Log 'SkipDellBiosChange was specified, so no Dell BIOS changes were attempted.' 'ERROR'
+        Write-ScriptLog 'SkipDellBiosChange was specified, so no Dell BIOS changes were attempted.' 'ERROR'
         exit 1
     }
 
     $adminPwdState = Test-DellAdminPasswordSet
     if ($adminPwdState -eq $true) {
-        Write-Log 'A Dell BIOS admin password appears to be set. This script does not use BIOS passwords and will not attempt changes.' 'ERROR'
+        Write-ScriptLog 'A Dell BIOS admin password appears to be set. This script does not use BIOS passwords and will not attempt changes.' 'ERROR'
         exit 2
     }
 
     $cctkPath = Get-CctkPath
     $providerName = Get-DellProviderModuleName
     if (-not $cctkPath -and -not $providerName) {
-        Write-Log 'Neither Dell Command | Configure (cctk.exe) nor the Dell BIOS PowerShell provider is installed. Cannot remediate BIOS settings in-band.' 'ERROR'
+        Write-ScriptLog 'Neither Dell Command | Configure (cctk.exe) nor the Dell BIOS PowerShell provider is installed. Cannot remediate BIOS settings in-band.' 'ERROR'
         exit 1
     }
 
@@ -728,15 +729,15 @@ if (-not $state.SecureBootEnabled) {
     $sbChanged = Enable-DellSecureBoot
 
     if ($legacyChanged -or $sbChanged) {
-        Write-Log 'Dell BIOS change(s) were issued. A reboot is required before Windows can continue with the UEFI CA 2023 update.'
+        Write-ScriptLog 'Dell BIOS change(s) were issued. A reboot is required before Windows can continue with the UEFI CA 2023 update.'
         if ($ForceRestart) {
-            Write-Log 'ForceRestart specified. Restarting now.'
+            Write-ScriptLog 'ForceRestart specified. Restarting now.'
             Start-WarnedRestart
         }
         exit 3010
     }
     else {
-        Write-Log 'Unable to enable Secure Boot in-band. Review the log for Dell tooling output and current BIOS dependencies.' 'ERROR'
+        Write-ScriptLog 'Unable to enable Secure Boot in-band. Review the log for Dell tooling output and current BIOS dependencies.' 'ERROR'
         exit 1
     }
 }
@@ -749,21 +750,21 @@ if ($null -eq $state.AvailableUpdates -or $state.AvailableUpdates -eq 0) {
     Start-Sleep -Seconds 8
 
     $post = Get-SecureBootSnapshot
-    Write-Log ("Post-run AvailableUpdates     : {0}" -f $post.AvailableUpdatesHex)
-    Write-Log ("Post-run UEFICA2023Status     : {0}" -f $post.UEFICA2023Status)
-    Write-Log ("Post-run UEFICA2023Error      : {0}" -f $post.UEFICA2023ErrorHex)
-    Write-Log ("Post-run UEFICA2023ErrorEvent : {0}" -f $post.UEFICA2023ErrorEvent)
+    Write-ScriptLog ("Post-run AvailableUpdates     : {0}" -f $post.AvailableUpdatesHex)
+    Write-ScriptLog ("Post-run UEFICA2023Status     : {0}" -f $post.UEFICA2023Status)
+    Write-ScriptLog ("Post-run UEFICA2023Error      : {0}" -f $post.UEFICA2023ErrorHex)
+    Write-ScriptLog ("Post-run UEFICA2023ErrorEvent : {0}" -f $post.UEFICA2023ErrorEvent)
 
     if ($post.UEFICA2023Error -and $post.UEFICA2023Error -ne 0) {
-        Write-Log 'The Secure Boot servicing keys report an error after the first task run. Review the logged TPM-WMI events.' 'ERROR'
+        Write-ScriptLog 'The Secure Boot servicing keys report an error after the first task run. Review the logged TPM-WMI events.' 'ERROR'
         exit 1
     }
 
     # Microsoft testing flow expects 0x4100 quickly, then reboot.
     if ($post.AvailableUpdates -eq 0x4100 -or $post.UEFICA2023Status -eq 'InProgress') {
-        Write-Log 'First update phase completed. Reboot is required before the second task run.'
+        Write-ScriptLog 'First update phase completed. Reboot is required before the second task run.'
         if ($ForceRestart) {
-            Write-Log 'ForceRestart specified. Restarting now.'
+            Write-ScriptLog 'ForceRestart specified. Restarting now.'
             Start-WarnedRestart
         }
         exit 3010
@@ -771,46 +772,46 @@ if ($null -eq $state.AvailableUpdates -or $state.AvailableUpdates -eq 0) {
 
     # If already updated early, return success.
     if ($post.DbHas2023 -or $post.UEFICA2023Status -eq 'Updated' -or $post.WindowsUEFICA2023Capable -ge 1) {
-        Write-Log 'UEFI CA 2023 update completed successfully.'
+        Write-ScriptLog 'UEFI CA 2023 update completed successfully.'
         exit 0
     }
 
-    Write-Log 'Update was queued, but the expected post-run state was not observed. Review the log and TPM-WMI events.' 'ERROR'
+    Write-ScriptLog 'Update was queued, but the expected post-run state was not observed. Review the log and TPM-WMI events.' 'ERROR'
     exit 1
 }
 
 # If the box was rebooted after phase 1 and is sitting at 0x4100, run task again.
 if ($state.AvailableUpdates -eq 0x4100) {
-    Write-Log 'Detected AvailableUpdates=0x4100. Running second Secure-Boot-Update task phase.'
+    Write-ScriptLog 'Detected AvailableUpdates=0x4100. Running second Secure-Boot-Update task phase.'
     Start-SecureBootTask
     Start-Sleep -Seconds 8
 
     $post = Get-SecureBootSnapshot
-    Write-Log ("Second-phase AvailableUpdates     : {0}" -f $post.AvailableUpdatesHex)
-    Write-Log ("Second-phase UEFICA2023Status     : {0}" -f $post.UEFICA2023Status)
-    Write-Log ("Second-phase UEFICA2023Error      : {0}" -f $post.UEFICA2023ErrorHex)
-    Write-Log ("Second-phase UEFICA2023ErrorEvent : {0}" -f $post.UEFICA2023ErrorEvent)
+    Write-ScriptLog ("Second-phase AvailableUpdates     : {0}" -f $post.AvailableUpdatesHex)
+    Write-ScriptLog ("Second-phase UEFICA2023Status     : {0}" -f $post.UEFICA2023Status)
+    Write-ScriptLog ("Second-phase UEFICA2023Error      : {0}" -f $post.UEFICA2023ErrorHex)
+    Write-ScriptLog ("Second-phase UEFICA2023ErrorEvent : {0}" -f $post.UEFICA2023ErrorEvent)
 
     if ($post.UEFICA2023Error -and $post.UEFICA2023Error -ne 0) {
-        Write-Log 'Secure Boot servicing reported an error during the second phase. Review the TPM-WMI events in the log.' 'ERROR'
+        Write-ScriptLog 'Secure Boot servicing reported an error during the second phase. Review the TPM-WMI events in the log.' 'ERROR'
         exit 1
     }
 
     if ($post.DbHas2023 -or $post.UEFICA2023Status -eq 'Updated' -or $post.WindowsUEFICA2023Capable -ge 1) {
-        Write-Log 'UEFI CA 2023 update completed successfully.'
+        Write-ScriptLog 'UEFI CA 2023 update completed successfully.'
         exit 0
     }
 
     if ($post.AvailableUpdates -eq 0x4000 -or $post.UEFICA2023Status -eq 'InProgress') {
-        Write-Log 'Second phase completed but the device still reports an in-progress state. Another reboot / normal boot cycle may be required.'
+        Write-ScriptLog 'Second phase completed but the device still reports an in-progress state. Another reboot / normal boot cycle may be required.'
         if ($ForceRestart) {
-            Write-Log 'ForceRestart specified. Restarting now.'
+            Write-ScriptLog 'ForceRestart specified. Restarting now.'
             Start-WarnedRestart
         }
         exit 3010
     }
 
-    Write-Log 'Second phase ran, but the expected final state was not observed. Review the log and recent Secure Boot events.' 'ERROR'
+    Write-ScriptLog 'Second phase ran, but the expected final state was not observed. Review the log and recent Secure Boot events.' 'ERROR'
     exit 1
 }
 
@@ -822,169 +823,288 @@ if ($state.AvailableUpdates -eq 0x4100) {
 # manually clearing the registry value. Re-issuing the task here is the
 # same recovery the 0x4100 branch above already does.
 if ($state.AvailableUpdates -eq 0x5944) {
-    Write-Log 'Detected AvailableUpdates=0x5944 with the task apparently not yet run (or interrupted). Re-running the Secure-Boot-Update task.'
+    Write-ScriptLog 'Detected AvailableUpdates=0x5944 with the task apparently not yet run (or interrupted). Re-running the Secure-Boot-Update task.'
     Start-SecureBootTask
     Start-Sleep -Seconds 8
 
     $post = Get-SecureBootSnapshot
-    Write-Log ("Re-run AvailableUpdates     : {0}" -f $post.AvailableUpdatesHex)
-    Write-Log ("Re-run UEFICA2023Status     : {0}" -f $post.UEFICA2023Status)
-    Write-Log ("Re-run UEFICA2023Error      : {0}" -f $post.UEFICA2023ErrorHex)
-    Write-Log ("Re-run UEFICA2023ErrorEvent : {0}" -f $post.UEFICA2023ErrorEvent)
+    Write-ScriptLog ("Re-run AvailableUpdates     : {0}" -f $post.AvailableUpdatesHex)
+    Write-ScriptLog ("Re-run UEFICA2023Status     : {0}" -f $post.UEFICA2023Status)
+    Write-ScriptLog ("Re-run UEFICA2023Error      : {0}" -f $post.UEFICA2023ErrorHex)
+    Write-ScriptLog ("Re-run UEFICA2023ErrorEvent : {0}" -f $post.UEFICA2023ErrorEvent)
 
     if ($post.UEFICA2023Error -and $post.UEFICA2023Error -ne 0) {
-        Write-Log 'Secure Boot servicing reported an error after re-running the task. Review the TPM-WMI events in the log.' 'ERROR'
+        Write-ScriptLog 'Secure Boot servicing reported an error after re-running the task. Review the TPM-WMI events in the log.' 'ERROR'
         exit 1
     }
 
     if ($post.DbHas2023 -or $post.UEFICA2023Status -eq 'Updated' -or $post.WindowsUEFICA2023Capable -ge 1) {
-        Write-Log 'UEFI CA 2023 update completed successfully.'
+        Write-ScriptLog 'UEFI CA 2023 update completed successfully.'
         exit 0
     }
 
     if ($post.AvailableUpdates -eq 0x4100 -or $post.UEFICA2023Status -eq 'InProgress') {
-        Write-Log 'Update phase completed after re-run. Reboot is required before the next phase.'
+        Write-ScriptLog 'Update phase completed after re-run. Reboot is required before the next phase.'
         if ($ForceRestart) {
-            Write-Log 'ForceRestart specified. Restarting now.'
+            Write-ScriptLog 'ForceRestart specified. Restarting now.'
             Start-WarnedRestart
         }
         exit 3010
     }
 
-    Write-Log 'Task was re-run, but the expected post-run state was not observed. Review the log and recent Secure Boot events.' 'ERROR'
+    Write-ScriptLog 'Task was re-run, but the expected post-run state was not observed. Review the log and recent Secure Boot events.' 'ERROR'
     exit 1
 }
 
 # If already in a pending/in-progress state, avoid resetting to 0x5944.
 if ($state.AvailableUpdates -eq 0x4000 -or $state.UEFICA2023Status -eq 'InProgress') {
-    Write-Log 'Secure Boot update is already in progress / pending finalization. Review recent events and allow another reboot / normal boot cycle.'
+    Write-ScriptLog 'Secure Boot update is already in progress / pending finalization. Review recent events and allow another reboot / normal boot cycle.'
     if ($ForceRestart) {
-        Write-Log 'ForceRestart specified. Restarting now.'
+        Write-ScriptLog 'ForceRestart specified. Restarting now.'
         Start-WarnedRestart
     }
     exit 3010
 }
 
 # Fall-through handling
-Write-Log 'No direct action taken because the device is in an unexpected Secure Boot servicing state. Review the logged registry values and TPM-WMI events.' 'ERROR'
+Write-ScriptLog 'No direct action taken because the device is in an unexpected Secure Boot servicing state. Review the logged registry values and TPM-WMI events.' 'ERROR'
 exit 1
 # SIG # Begin signature block
-# MIIV9QYJKoZIhvcNAQcCoIIV5jCCFeICAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIIsWQYJKoZIhvcNAQcCoIIsSjCCLEYCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBAy+Pzl+fy8yWI
-# 8EIyVqS/n3ZM27IJljTtKhnIxJ91/KCCEkQwggeJMIIGcaADAgECAhMSACPBoT1C
-# 4JRtz1HgAAAAI8GhMA0GCSqGSIb3DQEBCwUAMD4xEzARBgoJkiaJk/IsZAEZFgNu
-# ZXQxEzARBgoJkiaJk/IsZAEZFgNkb2kxEjAQBgNVBAMTCURPSUlNQ0EzMTAeFw0y
-# NjExMDYyMDEwNTlaFw0yNzExMDYyMDEwNTlaMIGLMQswCQYDVQQGEwJVUzELMAkG
-# A1UECBMCV0ExDzANBgNVBAcTBllha2ltYTEfMB0GA1UEChMWRGVwYXJ0bWVudCBv
-# ZiBJbnRlcmlvcjETMBEGA1UEAxMKU2FtIENhcm1hbjEoMCYGCSqGSIb3DQEJARYZ
-# c2FtdWFsX2Nhcm1hbkBpb3MuZG9pLmdvdjCCAiIwDQYJKoZIhvcNAQEBBQADggIP
-# ADCCAgoCggIBALMB65QhABf/6ERNshPoYKlz/TAexeE83Pa9aTLqWhLBEeryccgp
-# l7KAYxxNYP06e3SrZbPX02oExjHdcMFYQohXp3d9HWKhfRcsKEAlL8WmgI3TG9Fp
-# LS1Hxf+bpSXXIa3FS133UVA6mqX0HtCnX4nKkn8gVrDQ/Ar1G0ZMg2psHpTFxfEn
-# GVfz1CTjXBCKUE0uq3tZeRZJkPbqihGXCdk26l7BInFKJHExpHDg2M9BJu38/2QX
-# vAQ/rdt49qAQRvWYjbblOji0gr0iMOpPVY+9YKuDjOtWQxuinz94sqWpnjAGFVvf
-# bGvRV0o4INW45RKoXIsxSz9YNJ5e5HdMA6o9sXo5gtRJ19Rb6x9MtmBBEr8FFKXE
-# XFD+yY8by5Xt56szifqPNw9Acbruhxw1rDw1ClvtQGg7KS01eqI9Ist6e3WhEu3N
-# 0zOv+IkK2CqGCptbo2XECuPW5t1s2O9VjdAImEgAeDMwQ96g80YXqWSC5DeFBoip
-# CtR9SOQGfjokVlRs1b8ZshA7SjgYwdu6BmE0JOXZxrwiS2nLdHcQwAxfBOWLUUee
-# 8vowIDrpPPHGnQkNBLqfZV8E9vANo3x1m+y4QVRkiu2Yci025aQn0CnP1y9CW+i7
-# S7r43ZwrHz27s2U73t42hXjWIF5IvtTQ9EL1Hal68XV0KqgwSuZDv/MtAgMBAAGj
-# ggMwMIIDLDALBgNVHQ8EBAMCB4AwPQYJKwYBBAGCNxUHBDAwLgYmKwYBBAGCNxUI
-# hd7VSaKCaIephyOH3YdMg7XXKIEgh5imTYe8nh4CAWQCASEwHQYDVR0OBBYEFOGp
-# f7zHzoQZrBDnh/y41vVsuJDrMB8GA1UdIwQYMBaAFJ13VgBe0Gl5e1vAFWdt81nx
-# QGBUMIIBMAYDVR0fBIIBJzCCASMwggEfoIIBG6CCAReGgbFsZGFwOi8vL0NOPURP
-# SUlNQ0EzMSxDTj1JSU5ERU5JTUNBMzEsQ049Q0RQLENOPVB1YmxpYyUyMEtleSUy
-# MFNlcnZpY2VzLENOPVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24sREM9ZG9pLERD
-# PW5ldD9jZXJ0aWZpY2F0ZVJldm9jYXRpb25MaXN0P2Jhc2U/b2JqZWN0Q2xhc3M9
-# Y1JMRGlzdHJpYnV0aW9uUG9pbnSGNGh0dHA6Ly9JSU5ERU5JTUNBMzEuZG9pLm5l
-# dC9DZXJ0RW5yb2xsL0RPSUlNQ0EzMS5jcmyGK2h0dHA6Ly9wa2kuZG9pLm5ldC9D
-# ZXJ0RW5yb2xsL0RPSUlNQ0EzMS5jcmwwggE2BggrBgEFBQcBAQSCASgwggEkMIGk
-# BggrBgEFBQcwAoaBl2xkYXA6Ly8vQ049RE9JSU1DQTMxLENOPUFJQSxDTj1QdWJs
-# aWMlMjBLZXklMjBTZXJ2aWNlcyxDTj1TZXJ2aWNlcyxDTj1Db25maWd1cmF0aW9u
-# LERDPWRvaSxEQz1uZXQ/Y0FDZXJ0aWZpY2F0ZT9iYXNlP29iamVjdENsYXNzPWNl
-# cnRpZmljYXRpb25BdXRob3JpdHkwVQYIKwYBBQUHMAKGSWh0dHA6Ly9JSU5ERU5J
-# TUNBMzEuZG9pLm5ldC9DZXJ0RW5yb2xsL0lJTkRFTklNQ0EzMS5kb2kubmV0X0RP
-# SUlNQ0EzMS5jcnQwJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRvaS5nb3Yvb2Nz
-# cDATBgNVHSUEDDAKBggrBgEFBQcDAzAbBgkrBgEEAYI3FQoEDjAMMAoGCCsGAQUF
-# BwMDMA0GCSqGSIb3DQEBCwUAA4IBAQAJy0oIvD1YUCHaYMzqmkmAf3fGgKl5LXr4
-# nrzVUQ8NyqOVOofS5yJFeVH1S3MYdQddy6t2qWrMrdpEuDp91VmRTOJGyNZByj22
-# 3VKoBtlmVPtE2lpKmioOvvRcodTTbWFstxWBVXHAtU9zCJ6wIQonjpyz9qCctaN/
-# 0s7urcD2YUk7MvcwKEJQxGVDyxt8qxpptFQlZpdIbAqVac6lvoIU93GSOr5/dkIW
-# aIC9TNsTW2MxxuhaJ8+lLsqeAqt+TH10/CeZHfMdeBgBS7QJRFH0Nx7H1VcL1plO
-# KAnKz7CRc+TNDqOmvesmLG4t0sfUmMcylWLBYeyU72asqmm1UfDZMIIKszCCCJug
-# AwIBAgITTAAAAEJP4Xkdf3hC8QAAAAAAQjANBgkqhkiG9w0BAQsFADAVMRMwEQYD
-# VQQDEwpET0lSb290Q0EyMB4XDTIzMDYyNjE5MjEyMloXDTI4MDYyNjE5MzEyMlow
-# PjETMBEGCgmSJomT8ixkARkWA25ldDETMBEGCgmSJomT8ixkARkWA2RvaTESMBAG
-# A1UEAxMJRE9JSU1DQTMxMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA
-# rR6hbj0t+mKgdcJczlzU6OWcfMspR1izM2Y5nmtjcqV+yznzO3HvCSfPDyZN9seq
-# u+Omjv/axQSJDHKb9ynyt5f9UafC9PoDKxGucmIQqfYMM/CRtS3F4uU3S5wAXNTv
-# ROfbpieGWRK/AgaEIeIbgHBgW9NNS+krQEhG2TTcBdn3NzNVREjKezYwi/oQ35SD
-# ePu1T8rtyLbBq6JLI5gGCfycX7ZgQcXKzBQJpf0ovlgYSSdWvliRRTIiNvJexxjE
-# HCLhH3qJMKgYkJAlqQ9Qq9JPFurdwQv3E/uI+6aZP5S/9HyT+ZyN9lpdlPQMZByJ
-# 7H6uWSsIvtXtnZVMQe3e/wIDAQABo4IG0TCCBs0wEAYJKwYBBAGCNxUBBAMCAQAw
-# HQYDVR0OBBYEFJ13VgBe0Gl5e1vAFWdt81nxQGBUMIIE6wYDVR0gBIIE4jCCBN4w
-# ggIOBglghkgBZQMCARMwggH/MC8GCCsGAQUFBwIBFiNodHRwOi8vcGtpMi5kb2ku
-# bmV0L2xlZ2FscG9saWN5LmFzcDCCAcoGCCsGAQUFBwICMIIBvB6CAbgAQwBlAHIA
-# dABpAGYAaQBjAGEAdABlACAAaQBzAHMAdQBlAGQAIABiAHkAIAB0AGgAZQAgAEQA
-# ZQBwAGEAcgB0AG0AZQBuAHQAIABvAGYAIAB0AGgAZQAgAEkAbgB0AGUAcgBpAG8A
-# cgAgAGEAcgBlACAAbwBuAGwAeQAgAGYAbwByACAAaQBuAHQAZQByAG4AYQBsACAA
-# dQBuAGMAbABhAHMAcwBpAGYAaQBlAGQAIABVAFMAIABHAG8AdgBlAHIAbgBtAGUA
-# bgB0ACAAdQBzAGUAIABhAGwAbAAgAG8AdABoAGUAcgAgAHUAcwBlACAAaQBzACAA
-# cAByAG8AaABpAGIAaQB0AGUAZAAuACAAVQBuAGEAdQB0AGgAbwByAGkAegBlAGQA
-# IAB1AHMAZQAgAG0AYQB5ACAAcwB1AGIAagBlAGMAdAAgAHYAaQBvAGwAYQB0AG8A
-# cgBzACAAdABvACAAYwByAGkAbQBpAG4AYQBsACwAIABjAGkAdgBpAGwAIABhAG4A
-# ZAAvAG8AcgAgAGQAaQBzAGMAaQBwAGwAaQBuAGEAcgB5ACAAYQBjAHQAaQBvAG4A
-# LjCCAsgGCmCGSAFlAwIBEwEwggK4MDQGCCsGAQUFBwIBFihodHRwOi8vcGtpMi5k
-# b2kubmV0L2xpbWl0ZWR1c2Vwb2xpY3kuYXNwMIICfgYIKwYBBQUHAgIwggJwHoIC
-# bABVAHMAZQAgAG8AZgAgAHQAaABpAHMAIABDAGUAcgB0AGkAZgBpAGMAYQB0AGUA
-# IABpAHMAIABsAGkAbQBpAHQAZQBkACAAdABvACAASQBuAHQAZQByAG4AYQBsACAA
-# RwBvAHYAZQByAG4AbQBlAG4AdAAgAHUAcwBlACAAYgB5ACAALwAgAGYAbwByACAA
-# dABoAGUAIABEAGUAcABhAHIAdABtAGUAbgB0ACAAbwBmACAAdABoAGUAIABJAG4A
-# dABlAHIAaQBvAHIAIABvAG4AbAB5ACEAIABFAHgAdABlAHIAbgBhAGwAIAB1AHMA
-# ZQAgAG8AcgAgAHIAZQBjAGUAaQBwAHQAIABvAGYAIAB0AGgAaQBzACAAQwBlAHIA
-# dABpAGYAaQBjAGEAdABlACAAcwBoAG8AdQBsAGQAIABuAG8AdAAgAGIAZQAgAHQA
-# cgB1AHMAdABlAGQALgAgAEEAbABsACAAcwB1AHMAcABlAGMAdABlAGQAIABtAGkA
-# cwB1AHMAZQAgAG8AcgAgAGMAbwBtAHAAcgBvAG0AaQBzAGUAIABvAGYAIAB0AGgA
-# aQBzACAAYwBlAHIAdABpAGYAaQBjAGEAdABlACAAcwBoAG8AdQBsAGQAIABiAGUA
-# IAByAGUAcABvAHIAdABlAGQAIABpAG0AbQBlAGQAaQBhAHQAZQBsAHkAIAB0AG8A
-# IABhACAARABlAHAAYQByAHQAbQBlAG4AdAAgAG8AZgAgAHQAaABlACAASQBuAHQA
-# ZQByAGkAbwByACAAUwBlAGMAdQByAGkAdAB5ACAATwBmAGYAaQBjAGUAcgAuMBkG
-# CSsGAQQBgjcUAgQMHgoAUwB1AGIAQwBBMAsGA1UdDwQEAwIBhjAPBgNVHRMBAf8E
-# BTADAQH/MB8GA1UdIwQYMBaAFL+GK8rzbG0+Xxw7Tk7Yjedqx2pPMIH4BgNVHR8E
-# gfAwge0wgeqggeeggeSGgbJsZGFwOi8vL0NOPURPSVJvb3RDQTIsQ049SUlOREVO
-# T1JDQTAxLENOPUNEUCxDTj1QdWJsaWMlMjBLZXklMjBTZXJ2aWNlcyxDTj1TZXJ2
-# aWNlcyxDTj1Db25maWd1cmF0aW9uLERDPWRvaSxEQz1uZXQ/Y2VydGlmaWNhdGVS
-# ZXZvY2F0aW9uTGlzdD9iYXNlP29iamVjdENsYXNzPWNSTERpc3RyaWJ1dGlvblBv
-# aW50hi1odHRwOi8vcGtpMi5kb2kubmV0L0NlcnRFbnJvbGwvRE9JUm9vdENBMi5j
-# cmwwVgYIKwYBBQUHAQEESjBIMEYGCCsGAQUFBzAChjpodHRwOi8vcGtpMi5kb2ku
-# bmV0L0NlcnRFbnJvbGwvSUlOREVOT1JDQTAxX0RPSVJvb3RDQTIuY3J0MA0GCSqG
-# SIb3DQEBCwUAA4ICAQDG7R1D09znHx+f/ZFYA3cn9RxQdNuwfjksZqLHCJM+w5y8
-# zvNXrSy7sNFfenK/OtKvC88SJ2ToSLwgZ4OXCvYWuKqvZGsBsY0/asFLBY2uitwo
-# fOHHIUfO37ZtG3nc4vDluHghNYafPdPu1IetbWC6ZX0oasVV23OiAeG0tYzt2sVM
-# NU5sqRoLZxLtqaAV/Kb6scnJH+R/wxEUxSgnZkxlV/4K+PnYWmeAgM1/PKXNRk3M
-# 6gZYZ9EkBt40FtR8M99NF/5YinvyaEhDWuilG8cjxYmY6z8q1rrv+TNL2rpfUi65
-# bR26F/0jHrctTpp1anASAHztaSt5dUMDw3sk8tiYpbGbvu6859B6BgP0cbKb3T75
-# SOtvJjcnZZaapPDxMPv+itH7zrzrcH1CX7TilxUCAFKd6GizIrSCO+1Rfl5zcrLL
-# vxb4oxOz0763X/6e8CXYZM92vXzZlicSwk90qaXA6H2BJWNXxec8YzFw57OGTJBM
-# 7lzUFagPkcSUhXZDesdQik94dFvxgMz8NVB0EuJK1+8XwQjfoQfAEtFW0nnZHUgZ
-# yn5TkqFFvVbIBRQ6U1fUS3g5WzYfYfnmYKG1VCk2X+43KZcuC7AW/JxwAic+hKxS
-# Ie5bTR2fxpQgUT/Jr2GUTAIN14FLXOdA2GEykdJXvaJbsSzUip0lzegPKezXuDGC
-# AwcwggMDAgEBMFUwPjETMBEGCgmSJomT8ixkARkWA25ldDETMBEGCgmSJomT8ixk
-# ARkWA2RvaTESMBAGA1UEAxMJRE9JSU1DQTMxAhMSACPBoT1C4JRtz1HgAAAAI8Gh
-# MA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAIoAKAAKECgAAwGQYJ
-# KoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQB
-# gjcCARUwLwYJKoZIhvcNAQkEMSIEILqtRLTfJHhP8sajNSJ/Wf9iTklGft+q7tYf
-# Q/Qn00GlMA0GCSqGSIb3DQEBAQUABIICAKTmdswBy04huGpZ+BN7ld9ZY5zynMqE
-# uT4Dfdry7JBCbtBVaZKjRQRooe4aA2ZDEoOy5T3oaIu6+3tW16mX3kNPw2PUZh5o
-# kSAV22pDeap6KJ2dk/5mdWJAo4JsOU1R68i4Tjo7EY5H380/bAQXKdp6AkC87J95
-# YqxX5vbeMa+CsLj2Lco6heMpb2fBkvdfyPtdvi7qY+XnVm9kfmywuLr7BsGVdHB6
-# 9n+iS+Er92Oh8k+iSYVfP1mWKHZLTUrHuJy0VIAHgFpk7MLcooCjdHngVPdqUr/t
-# hhd2NI1FhOadkPv7V9VzPRiAvz/42n7bqtqxbddGur0pfAhdFpQuTDkQNoDZlqqQ
-# rfXG3QDXAk9fyIyh4kuSVm3Anyi1+w6I1C3MEuIqh6T+/hFPByXc6egdr/tfM4Th
-# USSZmpC3NDXe+PqRtjQ49SdZhhQuN9xTK0wfBoumMRfDalLlcTyZ1XjYSMnsjxal
-# W8vt3khzo7d9RWFX+fZCx1eBqVhFgWLnSMY7rY7Dx2Q1HqzWvX1mJgHkwMgoWJQJ
-# p9nrOlCb1ShcCCrp2mjlCMOAWbn5MTaXsJ7aFHtwvPDTOZUIvsssXgURNq9TvQfP
-# aILH9CJVZfhZUHnjCNZ1eslmuKCETaUVfcDXIDRU6e+glChP0A5ggk5clckA2wHH
-# Z4ERRWclYqUg
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCDkUQlh2LqVM53
+# p5m4H+wBKtP+gnQuIm3du81T9PFhv6CCJX4wggWNMIIEdaADAgECAhAOmxiO+dAt
+# 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
+# EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
+# BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
+# Fw0zMTExMDkyMzU5NTlaMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2Vy
+# dCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lD
+# ZXJ0IFRydXN0ZWQgUm9vdCBHNDCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoC
+# ggIBAL/mkHNo3rvkXUo8MCIwaTPswqclLskhPfKK2FnC4SmnPVirdprNrnsbhA3E
+# MB/zG6Q4FutWxpdtHauyefLKEdLkX9YFPFIPUh/GnhWlfr6fqVcWWVVyr2iTcMKy
+# unWZanMylNEQRBAu34LzB4TmdDttceItDBvuINXJIB1jKS3O7F5OyJP4IWGbNOsF
+# xl7sWxq868nPzaw0QF+xembud8hIqGZXV59UWI4MK7dPpzDZVu7Ke13jrclPXuU1
+# 5zHL2pNe3I6PgNq2kZhAkHnDeMe2scS1ahg4AxCN2NQ3pC4FfYj1gj4QkXCrVYJB
+# MtfbBHMqbpEBfCFM1LyuGwN1XXhm2ToxRJozQL8I11pJpMLmqaBn3aQnvKFPObUR
+# WBf3JFxGj2T3wWmIdph2PVldQnaHiZdpekjw4KISG2aadMreSx7nDmOu5tTvkpI6
+# nj3cAORFJYm2mkQZK37AlLTSYW3rM9nF30sEAMx9HJXDj/chsrIRt7t/8tWMcCxB
+# YKqxYxhElRp2Yn72gLD76GSmM9GJB+G9t+ZDpBi4pncB4Q+UDCEdslQpJYls5Q5S
+# UUd0viastkF13nqsX40/ybzTQRESW+UQUOsxxcpyFiIJ33xMdT9j7CFfxCBRa2+x
+# q4aLT8LWRV+dIPyhHsXAj6KxfgommfXkaS+YHS312amyHeUbAgMBAAGjggE6MIIB
+# NjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTs1+OC0nFdZEzfLmc/57qYrhwP
+# TzAfBgNVHSMEGDAWgBRF66Kv9JLLgjEtUYunpyGd823IDzAOBgNVHQ8BAf8EBAMC
+# AYYweQYIKwYBBQUHAQEEbTBrMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdp
+# Y2VydC5jb20wQwYIKwYBBQUHMAKGN2h0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNv
+# bS9EaWdpQ2VydEFzc3VyZWRJRFJvb3RDQS5jcnQwRQYDVR0fBD4wPDA6oDigNoY0
+# aHR0cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENB
+# LmNybDARBgNVHSAECjAIMAYGBFUdIAAwDQYJKoZIhvcNAQEMBQADggEBAHCgv0Nc
+# Vec4X6CjdBs9thbX979XB72arKGHLOyFXqkauyL4hxppVCLtpIh3bb0aFPQTSnov
+# Lbc47/T/gLn4offyct4kvFIDyE7QKt76LVbP+fT3rDB6mouyXtTP0UNEm0Mh65Zy
+# oUi0mcudT6cGAxN3J0TU53/oWajwvy8LpunyNDzs9wPHh6jSTEAZNUZqaVSwuKFW
+# juyk1T3osdz9HNj0d1pcVIxv76FQPfx2CWiEn2/K2yCNNWAcAgPLILCsWKAOQGPF
+# mCLBsln1VWvPJ6tsds5vIy30fnFqI2si/xK4VC0nftg62fC2h5b9W9FcrBjDTZ9z
+# twGpn1eqXijiuZQwgga0MIIEnKADAgECAhANx6xXBf8hmS5AQyIMOkmGMA0GCSqG
+# SIb3DQEBCwUAMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMx
+# GTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0IFRy
+# dXN0ZWQgUm9vdCBHNDAeFw0yNTA1MDcwMDAwMDBaFw0zODAxMTQyMzU5NTlaMGkx
+# CzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4
+# RGlnaUNlcnQgVHJ1c3RlZCBHNCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYg
+# MjAyNSBDQTEwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQC0eDHTCphB
+# cr48RsAcrHXbo0ZodLRRF51NrY0NlLWZloMsVO1DahGPNRcybEKq+RuwOnPhof6p
+# vF4uGjwjqNjfEvUi6wuim5bap+0lgloM2zX4kftn5B1IpYzTqpyFQ/4Bt0mAxAHe
+# HYNnQxqXmRinvuNgxVBdJkf77S2uPoCj7GH8BLuxBG5AvftBdsOECS1UkxBvMgEd
+# gkFiDNYiOTx4OtiFcMSkqTtF2hfQz3zQSku2Ws3IfDReb6e3mmdglTcaarps0wjU
+# jsZvkgFkriK9tUKJm/s80FiocSk1VYLZlDwFt+cVFBURJg6zMUjZa/zbCclF83bR
+# VFLeGkuAhHiGPMvSGmhgaTzVyhYn4p0+8y9oHRaQT/aofEnS5xLrfxnGpTXiUOeS
+# LsJygoLPp66bkDX1ZlAeSpQl92QOMeRxykvq6gbylsXQskBBBnGy3tW/AMOMCZIV
+# NSaz7BX8VtYGqLt9MmeOreGPRdtBx3yGOP+rx3rKWDEJlIqLXvJWnY0v5ydPpOjL
+# 6s36czwzsucuoKs7Yk/ehb//Wx+5kMqIMRvUBDx6z1ev+7psNOdgJMoiwOrUG2Zd
+# SoQbU2rMkpLiQ6bGRinZbI4OLu9BMIFm1UUl9VnePs6BaaeEWvjJSjNm2qA+sdFU
+# eEY0qVjPKOWug/G6X5uAiynM7Bu2ayBjUwIDAQABo4IBXTCCAVkwEgYDVR0TAQH/
+# BAgwBgEB/wIBADAdBgNVHQ4EFgQU729TSunkBnx6yuKQVvYv1Ensy04wHwYDVR0j
+# BBgwFoAU7NfjgtJxXWRM3y5nP+e6mK4cD08wDgYDVR0PAQH/BAQDAgGGMBMGA1Ud
+# JQQMMAoGCCsGAQUFBwMIMHcGCCsGAQUFBwEBBGswaTAkBggrBgEFBQcwAYYYaHR0
+# cDovL29jc3AuZGlnaWNlcnQuY29tMEEGCCsGAQUFBzAChjVodHRwOi8vY2FjZXJ0
+# cy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNydDBDBgNVHR8E
+# PDA6MDigNqA0hjJodHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVz
+# dGVkUm9vdEc0LmNybDAgBgNVHSAEGTAXMAgGBmeBDAEEAjALBglghkgBhv1sBwEw
+# DQYJKoZIhvcNAQELBQADggIBABfO+xaAHP4HPRF2cTC9vgvItTSmf83Qh8WIGjB/
+# T8ObXAZz8OjuhUxjaaFdleMM0lBryPTQM2qEJPe36zwbSI/mS83afsl3YTj+IQhQ
+# E7jU/kXjjytJgnn0hvrV6hqWGd3rLAUt6vJy9lMDPjTLxLgXf9r5nWMQwr8Myb9r
+# EVKChHyfpzee5kH0F8HABBgr0UdqirZ7bowe9Vj2AIMD8liyrukZ2iA/wdG2th9y
+# 1IsA0QF8dTXqvcnTmpfeQh35k5zOCPmSNq1UH410ANVko43+Cdmu4y81hjajV/gx
+# dEkMx1NKU4uHQcKfZxAvBAKqMVuqte69M9J6A47OvgRaPs+2ykgcGV00TYr2Lr3t
+# y9qIijanrUR3anzEwlvzZiiyfTPjLbnFRsjsYg39OlV8cipDoq7+qNNjqFzeGxcy
+# tL5TTLL4ZaoBdqbhOhZ3ZRDUphPvSRmMThi0vw9vODRzW6AxnJll38F0cuJG7uEB
+# YTptMSbhdhGQDpOXgpIUsWTjd6xpR6oaQf/DJbg3s6KCLPAlZ66RzIg9sC+NJpud
+# /v4+7RWsWCiKi9EOLLHfMR2ZyJ/+xhCx9yHbxtl5TPau1j/1MIDpMPx0LckTetiS
+# uEtQvLsNz3Qbp7wGWqbIiOWCnb5WqxL3/BAPvIXKUjPSxyZsq8WhbaM2tszWkPZP
+# ubdcMIIG7TCCBNWgAwIBAgIQCE/cM09+RU7bww+P+ZIYNTANBgkqhkiG9w0BAQsF
+# ADBpMQswCQYDVQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNV
+# BAMTOERpZ2lDZXJ0IFRydXN0ZWQgRzQgVGltZVN0YW1waW5nIFJTQTQwOTYgU0hB
+# MjU2IDIwMjUgQ0ExMB4XDTI2MDgwNTAwMDAwMFoXDTM3MTEwNDIzNTk1OVowYzEL
+# MAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMTswOQYDVQQDEzJE
+# aWdpQ2VydCBTSEEyNTYgUlNBNDA5NiBUaW1lc3RhbXAgUmVzcG9uZGVyIDIwMjYg
+# MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALZ7pvLJ/s1K+NSbTGWz
+# /TjGMPh8CQ6RucZCLv5anHzWJjF/NWJrFIhy24fcpKXlgRiky4WAawDfU3YP0BMx
+# t9l3Dm5oCG5Z69AqEN1kgHg2epx+l+lZBcmJCcN0ASURML5uFIS80sZsDwO3BSkU
+# xDjLJhBI+qiZP3aixAC/qEGLjsBNlLol9VZ7pfGEXiMlneJIC5/YKuizVzNFKZZE
+# eoy/0B8Zm+nzKBgSWG52lCO1w+nCg6XpCtklTJXeIg283hw7TmmsZXR+SMbjbrEO
+# vZ3fP2VxIgeR28Y90ZStd3F9VuA5RVynb/whITPAo9b75Zr4Ta6Mj3URm26QZYMn
+# /FnbuTegcoRcFEZ9FOqM5T6MTdtr/n74lIT/ug0eeOzmZ6QTFg33otX+bFRsIolv
+# ykE1jive4PuESaT8zzVeFWDAMDtozNgLctkGD1ZjkEyZtJrLl5ya0m5doH/ScpaZ
+# CZVl6pNUOCybMc/kxC6EAmSJY24L0yYKD1Nkddsnb/ItVKi/2nXpQNMu1PT5prW8
+# 3vV8d67WowuUs0HdY4H8AMLGvdL/WHEj3ZnqMqAQQP9u3Ai9t+5eQ02GDwy0ODjd
+# zi0xlp70W+ow63/0++YDEX1M0iwgUHwbrJvfpklkZQvw3+kv3vUPItdwroczk9ic
+# flf55W1zOEKAcJVAIXpcMCU9AgMBAAGjggGVMIIBkTAMBgNVHRMBAf8EAjAAMB0G
+# A1UdDgQWBBQUyWOKMC7USvtulPPm40B+9ezN4jAfBgNVHSMEGDAWgBTvb1NK6eQG
+# fHrK4pBW9i/USezLTjAOBgNVHQ8BAf8EBAMCB4AwFgYDVR0lAQH/BAwwCgYIKwYB
+# BQUHAwgwgZUGCCsGAQUFBwEBBIGIMIGFMCQGCCsGAQUFBzABhhhodHRwOi8vb2Nz
+# cC5kaWdpY2VydC5jb20wXQYIKwYBBQUHMAKGUWh0dHA6Ly9jYWNlcnRzLmRpZ2lj
+# ZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRHNFRpbWVTdGFtcGluZ1JTQTQwOTZTSEEy
+# NTYyMDI1Q0ExLmNydDBfBgNVHR8EWDBWMFSgUqBQhk5odHRwOi8vY3JsMy5kaWdp
+# Y2VydC5jb20vRGlnaUNlcnRUcnVzdGVkRzRUaW1lU3RhbXBpbmdSU0E0MDk2U0hB
+# MjU2MjAyNUNBMS5jcmwwIAYDVR0gBBkwFzAIBgZngQwBBAIwCwYJYIZIAYb9bAcB
+# MA0GCSqGSIb3DQEBCwUAA4ICAQCNxTphHp1SCt+ZrAmAfn0oQLFr0mLywSLaDXQI
+# ENoyKqxrFbJblzCVP/pkXmwXOdrOpWygLzlT12os5ipDCy35RBCg2UMeApEtrfGh
+# z45F4Wt4WGdNdIbRWt3YTYJmpR+b7lr4d7Uwn+H600u4D7RnOGf8Wj4UNgAdZkfH
+# hHv1mx9EVh71SJelcEN/oORSjXzdjfw1iZH9d8Nh/thn6hH23d+VsPAr6GAYyzSA
+# 02nXD1nYLI7Ijmiv+xLCiYC41DSFYL3GhTiy0PxpawPtGRyaBVGzq+UiTfM8pD7K
+# VyF5aQyWP4KhVGUUTnmm/RlYJoW3TiXA/+t0YcT2oRVBm3JETjajHug2AL+v5jht
+# KVnd3D0rbHXEu27o+Q8p4sEWPMqKDB+qbceb6T/6WcwTwXmQ9lOCLLYcsQeSWmvK
+# qzpAec9etE14jOQAzLKWdE3w/TCaKtLRaRT7LCkRYVnhA2D73FLje1O5b3HR5eHs
+# 0NzU/+xX7NbEdcofy0W3Wdwd1XOqtlpg/JgwtKfZM5dqO94lbUveOiJBI+xZEbGR
+# sMNbXmMREUTgu+Oca7Y73MPWcslIx2VhkSKSXjDbD6rgg39H5Mh7QfieAIjWagkJ
+# Nt68Yfim6cjEzVSiLSeZfdkr5dtFPTW6jATlWJdYeeDRGCyatf8R1hSjzSvdN8yW
+# QPT9gzCCB4kwggZxoAMCAQICExIAI8GhPULglG3PUeAAAAAjwaEwDQYJKoZIhvcN
+# AQELBQAwPjETMBEGCgmSJomT8ixkARkWA25ldDETMBEGCgmSJomT8ixkARkWA2Rv
+# aTESMBAGA1UEAxMJRE9JSU1DQTMxMB4XDTI2MTEwNjIwMTA1OVoXDTI3MTEwNjIw
+# MTA1OVowgYsxCzAJBgNVBAYTAlVTMQswCQYDVQQIEwJXQTEPMA0GA1UEBxMGWWFr
+# aW1hMR8wHQYDVQQKExZEZXBhcnRtZW50IG9mIEludGVyaW9yMRMwEQYDVQQDEwpT
+# YW0gQ2FybWFuMSgwJgYJKoZIhvcNAQkBFhlzYW11YWxfY2FybWFuQGlvcy5kb2ku
+# Z292MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAswHrlCEAF//oRE2y
+# E+hgqXP9MB7F4Tzc9r1pMupaEsER6vJxyCmXsoBjHE1g/Tp7dKtls9fTagTGMd1w
+# wVhCiFend30dYqF9FywoQCUvxaaAjdMb0WktLUfF/5ulJdchrcVLXfdRUDqapfQe
+# 0KdficqSfyBWsND8CvUbRkyDamwelMXF8ScZV/PUJONcEIpQTS6re1l5FkmQ9uqK
+# EZcJ2TbqXsEicUokcTGkcODYz0Em7fz/ZBe8BD+t23j2oBBG9ZiNtuU6OLSCvSIw
+# 6k9Vj71gq4OM61ZDG6KfP3iypameMAYVW99sa9FXSjgg1bjlEqhcizFLP1g0nl7k
+# d0wDqj2xejmC1EnX1FvrH0y2YEESvwUUpcRcUP7JjxvLle3nqzOJ+o83D0Bxuu6H
+# HDWsPDUKW+1AaDspLTV6oj0iy3p7daES7c3TM6/4iQrYKoYKm1ujZcQK49bm3WzY
+# 71WN0AiYSAB4MzBD3qDzRhepZILkN4UGiKkK1H1I5AZ+OiRWVGzVvxmyEDtKOBjB
+# 27oGYTQk5dnGvCJLact0dxDADF8E5YtRR57y+jAgOuk88cadCQ0Eup9lXwT28A2j
+# fHWb7LhBVGSK7ZhyLTblpCfQKc/XL0Jb6LtLuvjdnCsfPbuzZTve3jaFeNYgXki+
+# 1ND0QvUdqXrxdXQqqDBK5kO/8y0CAwEAAaOCAzAwggMsMAsGA1UdDwQEAwIHgDA9
+# BgkrBgEEAYI3FQcEMDAuBiYrBgEEAYI3FQiF3tVJooJoh6mHI4fdh0yDtdcogSCH
+# mKZNh7yeHgIBZAIBITAdBgNVHQ4EFgQU4al/vMfOhBmsEOeH/LjW9Wy4kOswHwYD
+# VR0jBBgwFoAUnXdWAF7QaXl7W8AVZ23zWfFAYFQwggEwBgNVHR8EggEnMIIBIzCC
+# AR+gggEboIIBF4aBsWxkYXA6Ly8vQ049RE9JSU1DQTMxLENOPUlJTkRFTklNQ0Ez
+# MSxDTj1DRFAsQ049UHVibGljJTIwS2V5JTIwU2VydmljZXMsQ049U2VydmljZXMs
+# Q049Q29uZmlndXJhdGlvbixEQz1kb2ksREM9bmV0P2NlcnRpZmljYXRlUmV2b2Nh
+# dGlvbkxpc3Q/YmFzZT9vYmplY3RDbGFzcz1jUkxEaXN0cmlidXRpb25Qb2ludIY0
+# aHR0cDovL0lJTkRFTklNQ0EzMS5kb2kubmV0L0NlcnRFbnJvbGwvRE9JSU1DQTMx
+# LmNybIYraHR0cDovL3BraS5kb2kubmV0L0NlcnRFbnJvbGwvRE9JSU1DQTMxLmNy
+# bDCCATYGCCsGAQUFBwEBBIIBKDCCASQwgaQGCCsGAQUFBzAChoGXbGRhcDovLy9D
+# Tj1ET0lJTUNBMzEsQ049QUlBLENOPVB1YmxpYyUyMEtleSUyMFNlcnZpY2VzLENO
+# PVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24sREM9ZG9pLERDPW5ldD9jQUNlcnRp
+# ZmljYXRlP2Jhc2U/b2JqZWN0Q2xhc3M9Y2VydGlmaWNhdGlvbkF1dGhvcml0eTBV
+# BggrBgEFBQcwAoZJaHR0cDovL0lJTkRFTklNQ0EzMS5kb2kubmV0L0NlcnRFbnJv
+# bGwvSUlOREVOSU1DQTMxLmRvaS5uZXRfRE9JSU1DQTMxLmNydDAkBggrBgEFBQcw
+# AYYYaHR0cDovL29jc3AuZG9pLmdvdi9vY3NwMBMGA1UdJQQMMAoGCCsGAQUFBwMD
+# MBsGCSsGAQQBgjcVCgQOMAwwCgYIKwYBBQUHAwMwDQYJKoZIhvcNAQELBQADggEB
+# AAnLSgi8PVhQIdpgzOqaSYB/d8aAqXktevievNVRDw3Ko5U6h9LnIkV5UfVLcxh1
+# B13Lq3apasyt2kS4On3VWZFM4kbI1kHKPbbdUqgG2WZU+0TaWkqaKg6+9Fyh1NNt
+# YWy3FYFVccC1T3MInrAhCieOnLP2oJy1o3/Szu6twPZhSTsy9zAoQlDEZUPLG3yr
+# Gmm0VCVml0hsCpVpzqW+ghT3cZI6vn92QhZogL1M2xNbYzHG6Fonz6Uuyp4Cq35M
+# fXT8J5kd8x14GAFLtAlEUfQ3HsfVVwvWmU4oCcrPsJFz5M0Oo6a96yYsbi3Sx9SY
+# xzKVYsFh7JTvZqyqabVR8NkwggqzMIIIm6ADAgECAhNMAAAAQk/heR1/eELxAAAA
+# AABCMA0GCSqGSIb3DQEBCwUAMBUxEzARBgNVBAMTCkRPSVJvb3RDQTIwHhcNMjMw
+# NjI2MTkyMTIyWhcNMjgwNjI2MTkzMTIyWjA+MRMwEQYKCZImiZPyLGQBGRYDbmV0
+# MRMwEQYKCZImiZPyLGQBGRYDZG9pMRIwEAYDVQQDEwlET0lJTUNBMzEwggEiMA0G
+# CSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCtHqFuPS36YqB1wlzOXNTo5Zx8yylH
+# WLMzZjmea2NypX7LOfM7ce8JJ88PJk32x6q746aO/9rFBIkMcpv3KfK3l/1Rp8L0
+# +gMrEa5yYhCp9gwz8JG1LcXi5TdLnABc1O9E59umJ4ZZEr8CBoQh4huAcGBb001L
+# 6StASEbZNNwF2fc3M1VESMp7NjCL+hDflIN4+7VPyu3ItsGroksjmAYJ/JxftmBB
+# xcrMFAml/Si+WBhJJ1a+WJFFMiI28l7HGMQcIuEfeokwqBiQkCWpD1Cr0k8W6t3B
+# C/cT+4j7ppk/lL/0fJP5nI32Wl2U9AxkHInsfq5ZKwi+1e2dlUxB7d7/AgMBAAGj
+# ggbRMIIGzTAQBgkrBgEEAYI3FQEEAwIBADAdBgNVHQ4EFgQUnXdWAF7QaXl7W8AV
+# Z23zWfFAYFQwggTrBgNVHSAEggTiMIIE3jCCAg4GCWCGSAFlAwIBEzCCAf8wLwYI
+# KwYBBQUHAgEWI2h0dHA6Ly9wa2kyLmRvaS5uZXQvbGVnYWxwb2xpY3kuYXNwMIIB
+# ygYIKwYBBQUHAgIwggG8HoIBuABDAGUAcgB0AGkAZgBpAGMAYQB0AGUAIABpAHMA
+# cwB1AGUAZAAgAGIAeQAgAHQAaABlACAARABlAHAAYQByAHQAbQBlAG4AdAAgAG8A
+# ZgAgAHQAaABlACAASQBuAHQAZQByAGkAbwByACAAYQByAGUAIABvAG4AbAB5ACAA
+# ZgBvAHIAIABpAG4AdABlAHIAbgBhAGwAIAB1AG4AYwBsAGEAcwBzAGkAZgBpAGUA
+# ZAAgAFUAUwAgAEcAbwB2AGUAcgBuAG0AZQBuAHQAIAB1AHMAZQAgAGEAbABsACAA
+# bwB0AGgAZQByACAAdQBzAGUAIABpAHMAIABwAHIAbwBoAGkAYgBpAHQAZQBkAC4A
+# IABVAG4AYQB1AHQAaABvAHIAaQB6AGUAZAAgAHUAcwBlACAAbQBhAHkAIABzAHUA
+# YgBqAGUAYwB0ACAAdgBpAG8AbABhAHQAbwByAHMAIAB0AG8AIABjAHIAaQBtAGkA
+# bgBhAGwALAAgAGMAaQB2AGkAbAAgAGEAbgBkAC8AbwByACAAZABpAHMAYwBpAHAA
+# bABpAG4AYQByAHkAIABhAGMAdABpAG8AbgAuMIICyAYKYIZIAWUDAgETATCCArgw
+# NAYIKwYBBQUHAgEWKGh0dHA6Ly9wa2kyLmRvaS5uZXQvbGltaXRlZHVzZXBvbGlj
+# eS5hc3AwggJ+BggrBgEFBQcCAjCCAnAeggJsAFUAcwBlACAAbwBmACAAdABoAGkA
+# cwAgAEMAZQByAHQAaQBmAGkAYwBhAHQAZQAgAGkAcwAgAGwAaQBtAGkAdABlAGQA
+# IAB0AG8AIABJAG4AdABlAHIAbgBhAGwAIABHAG8AdgBlAHIAbgBtAGUAbgB0ACAA
+# dQBzAGUAIABiAHkAIAAvACAAZgBvAHIAIAB0AGgAZQAgAEQAZQBwAGEAcgB0AG0A
+# ZQBuAHQAIABvAGYAIAB0AGgAZQAgAEkAbgB0AGUAcgBpAG8AcgAgAG8AbgBsAHkA
+# IQAgAEUAeAB0AGUAcgBuAGEAbAAgAHUAcwBlACAAbwByACAAcgBlAGMAZQBpAHAA
+# dAAgAG8AZgAgAHQAaABpAHMAIABDAGUAcgB0AGkAZgBpAGMAYQB0AGUAIABzAGgA
+# bwB1AGwAZAAgAG4AbwB0ACAAYgBlACAAdAByAHUAcwB0AGUAZAAuACAAQQBsAGwA
+# IABzAHUAcwBwAGUAYwB0AGUAZAAgAG0AaQBzAHUAcwBlACAAbwByACAAYwBvAG0A
+# cAByAG8AbQBpAHMAZQAgAG8AZgAgAHQAaABpAHMAIABjAGUAcgB0AGkAZgBpAGMA
+# YQB0AGUAIABzAGgAbwB1AGwAZAAgAGIAZQAgAHIAZQBwAG8AcgB0AGUAZAAgAGkA
+# bQBtAGUAZABpAGEAdABlAGwAeQAgAHQAbwAgAGEAIABEAGUAcABhAHIAdABtAGUA
+# bgB0ACAAbwBmACAAdABoAGUAIABJAG4AdABlAHIAaQBvAHIAIABTAGUAYwB1AHIA
+# aQB0AHkAIABPAGYAZgBpAGMAZQByAC4wGQYJKwYBBAGCNxQCBAweCgBTAHUAYgBD
+# AEEwCwYDVR0PBAQDAgGGMA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0jBBgwFoAUv4Yr
+# yvNsbT5fHDtOTtiN52rHak8wgfgGA1UdHwSB8DCB7TCB6qCB56CB5IaBsmxkYXA6
+# Ly8vQ049RE9JUm9vdENBMixDTj1JSU5ERU5PUkNBMDEsQ049Q0RQLENOPVB1Ymxp
+# YyUyMEtleSUyMFNlcnZpY2VzLENOPVNlcnZpY2VzLENOPUNvbmZpZ3VyYXRpb24s
+# REM9ZG9pLERDPW5ldD9jZXJ0aWZpY2F0ZVJldm9jYXRpb25MaXN0P2Jhc2U/b2Jq
+# ZWN0Q2xhc3M9Y1JMRGlzdHJpYnV0aW9uUG9pbnSGLWh0dHA6Ly9wa2kyLmRvaS5u
+# ZXQvQ2VydEVucm9sbC9ET0lSb290Q0EyLmNybDBWBggrBgEFBQcBAQRKMEgwRgYI
+# KwYBBQUHMAKGOmh0dHA6Ly9wa2kyLmRvaS5uZXQvQ2VydEVucm9sbC9JSU5ERU5P
+# UkNBMDFfRE9JUm9vdENBMi5jcnQwDQYJKoZIhvcNAQELBQADggIBAMbtHUPT3Ocf
+# H5/9kVgDdyf1HFB027B+OSxmoscIkz7DnLzO81etLLuw0V96cr860q8LzxInZOhI
+# vCBng5cK9ha4qq9kawGxjT9qwUsFja6K3Ch84cchR87ftm0bedzi8OW4eCE1hp89
+# 0+7Uh61tYLplfShqxVXbc6IB4bS1jO3axUw1TmypGgtnEu2poBX8pvqxyckf5H/D
+# ERTFKCdmTGVX/gr4+dhaZ4CAzX88pc1GTczqBlhn0SQG3jQW1Hwz300X/liKe/Jo
+# SENa6KUbxyPFiZjrPyrWuu/5M0vaul9SLrltHboX/SMety1OmnVqcBIAfO1pK3l1
+# QwPDeyTy2JilsZu+7rzn0HoGA/RxspvdPvlI628mNydllpqk8PEw+/6K0fvOvOtw
+# fUJftOKXFQIAUp3oaLMitII77VF+XnNyssu/FvijE7PTvrdf/p7wJdhkz3a9fNmW
+# JxLCT3SppcDofYElY1fF5zxjMXDns4ZMkEzuXNQVqA+RxJSFdkN6x1CKT3h0W/GA
+# zPw1UHQS4krX7xfBCN+hB8AS0VbSedkdSBnKflOSoUW9VsgFFDpTV9RLeDlbNh9h
+# +eZgobVUKTZf7jcply4LsBb8nHACJz6ErFIh7ltNHZ/GlCBRP8mvYZRMAg3XgUtc
+# 50DYYTKR0le9oluxLNSKnSXN6A8p7Ne4MYIGMTCCBi0CAQEwVTA+MRMwEQYKCZIm
+# iZPyLGQBGRYDbmV0MRMwEQYKCZImiZPyLGQBGRYDZG9pMRIwEAYDVQQDEwlET0lJ
+# TUNBMzECExIAI8GhPULglG3PUeAAAAAjwaEwDQYJYIZIAWUDBAIBBQCggYQwGAYK
+# KwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIB
+# BDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg
+# 0jXEj+3ynDr1X0+y/Wox7Nnnyu2zOyimeiOVI3DhPNEwDQYJKoZIhvcNAQEBBQAE
+# ggIAMMufHO1Cc6Jn20JC9hz71aRH8C111o6UB3tjmaWReGv/zs+IM7vyWnMUUDfM
+# nd1gF3Utr5KuOHK2njGVDWH+WWgkomF1cyonpmgonYZWv5xXu1huVea/EQcwWFG7
+# G7xNOU3rWQarj8YqjMTi2eAa4ALVLT6mby+sb0Tt7REmExsYj/7PaEddr1bhY6eU
+# oBxFyyX2+FpEc3JxnxF5t3wlDN1bLY55V5lgkkP9O3Wb6MjhhkWuLWCJbuwNgZl1
+# nRkxETjoZyN8FRyv9wCaNxY7WCG+7Xp0vkl5q6O+OSVRd/Mf00ZePZ554rJi35vn
+# 1bYVD/xgbwrj9W3UQqSBmYEWRMuzoThFbd5eqzK/5dzcsNgsN8ffU6NuqN3XbYA2
+# rtTRjHAuT9OO2+7LREBOn+1HRHU+E1Wwi50EPDsPz5LibO7cRD+JMedkmsvqn0Yp
+# wuxEoQJiIdvgFt1/JZ2+5J7rDedZpWFb1InTeicRU2MRf13uwNKSqvk2RvnOVeWb
+# FXcTYMKRZpA3wcvnFViaWH56PC6vFBkKT+JgxVX019l+rxkyC1ajrzPLc3pmWiRt
+# d28dUnWZQPFt+yerShfqo9Nrc5NjdA6RjQV3Rs5FRS4iVIUyAf44WyK+o9klCZBo
+# sPgCYjZpi9URTERz9jSSBnxrc7QrohhmvxBkEIzCE5ipIvChggMmMIIDIgYJKoZI
+# hvcNAQkGMYIDEzCCAw8CAQEwfTBpMQswCQYDVQQGEwJVUzEXMBUGA1UEChMORGln
+# aUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0IFRydXN0ZWQgRzQgVGltZVN0
+# YW1waW5nIFJTQTQwOTYgU0hBMjU2IDIwMjUgQ0ExAhAIT9wzT35FTtvDD4/5khg1
+# MA0GCWCGSAFlAwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkq
+# hkiG9w0BCQUxDxcNMjYxMTA2MjM1ODU2WjAvBgkqhkiG9w0BCQQxIgQgbVWwE/lO
+# aNBdfxN14GSevrpNlWlOkfPeFMhtflTdZeEwDQYJKoZIhvcNAQEBBQAEggIAFwS8
+# gDG4y0gU3tINssldIs9jWxrzIwHT0cD9UhdlQyGuvjvLWGMNTNP4QuWV05hbHqmO
+# feF9L8wDgf3dTOX97ZtH9t7jVpjTVgfsK0Ko/dReiJR521GjcnfdHzXgnK7fH9DK
+# ya5cpNEeeM2b96WK7aHsmVmJ6YnfsewL1YKR9Ly2e+zpJ19CLgbX8PP//z0r9AGZ
+# iuKpTdYCl7P0e/8y0FknsJfg0nqRZ/slD9EyTrC2ONUwofAiVm0A+vBpnfWXbSrI
+# 1aBAApWxOvu5LBy8cT5rg+02RH1CTKk4u7ze2j6q1/MJbU9/OhXe5mHAwKbSdMwh
+# jax4sDTjZx97EoDd1drt0CWYdZZtSY1k1F7ntBAw95dbQrFqnFFUYpw8MXg02svm
+# x4YDhLvEoT0nSBuxqnlV0PVeH0bFeS8UFg05FJZPBgI85EAnrMNI0a/pyr3hHVyd
+# ymmjePbVOTZezMaKVXCkr9RioBceWyTNftcDl0l8QvYs9eni9xAdDYgy2mdrlajO
+# w8tari6gJnBCvM6cFCD3Zj8myl590M5oJD6OsXs+Xhk+KhznM8EXcl9JIj9af/t2
+# B0IJX/iR+9A4ghrrZxvk5ue27ERzB4w2kB+s9ZL5pLeq031zUB4jwcOquxHIWQc9
+# n7EcNZl3FKeOoAwv7TmN/82ozDVTl1TUItJ/zY0=
 # SIG # End signature block

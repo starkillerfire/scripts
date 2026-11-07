@@ -10,3 +10,6 @@
 # Keep repository documentation and ignore rules consistent across platforms.
 .gitignore text eol=lf
 *.md text eol=lf
+
+# Git hook scripts are run by sh and need LF endings.
+maintenance/hooks/* text eol=lf
